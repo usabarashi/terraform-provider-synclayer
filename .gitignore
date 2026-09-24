@@ -1,0 +1,32 @@
+# Binaries
+terraform-provider-synclayer
+/dist/
+/result
+
+# Test / build artefacts
+*.test
+*.out
+coverage.txt
+
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# direnv
+.direnv/
+
+# Local secrets
+*.auto.tfvars
+.env
