@@ -574,6 +574,12 @@ func (c *Client) GetDDNS(ctx context.Context) (*DDNS, error) {
 // UpdateDDNS applies a DDNS configuration. The password is encrypted with the
 // scheme expected by the firmware (see EncodeDDNSPassword). The full document
 // is sent because the device validates the accompanying provider list.
+//
+// An empty cfg.Password means "keep the stored credential": the device returns
+// the existing password in an envelope encrypted with the current session
+// token (verified against firmware), so it is recovered and re-encoded rather
+// than sent as empty (which would wipe it). If the stored value cannot be
+// recovered the update is rejected instead of silently clearing it.
 func (c *Client) UpdateDDNS(ctx context.Context, active bool, cfg DDNSConfiguration) (*DDNSResult, error) {
 	current, err := c.GetDDNS(ctx)
 	if err != nil {
@@ -586,12 +592,28 @@ func (c *Client) UpdateDDNS(ctx context.Context, active bool, cfg DDNSConfigurat
 	cfg.Password = ""
 
 	build := func(token string) (interface{}, error) {
-		encoded, err := EncodeDDNSPassword(token, cfg.Username, plainPassword)
-		if err != nil {
-			return nil, err
-		}
 		effective := cfg
-		effective.Password = encoded
+		switch {
+		case plainPassword != "":
+			encoded, err := EncodeDDNSPassword(token, cfg.Username, plainPassword)
+			if err != nil {
+				return nil, err
+			}
+			effective.Password = encoded
+		case current.Configuration.Password != "":
+			recovered, err := DecodeDDNSPassword(token, current.Configuration.Password)
+			if err != nil {
+				return nil, fmt.Errorf("cannot preserve the existing DDNS password: %w; set the password argument to replace it", err)
+			}
+			encoded, err := EncodeDDNSPassword(token, cfg.Username, recovered)
+			if err != nil {
+				return nil, err
+			}
+			effective.Password = encoded
+		default:
+			effective.Password = ""
+		}
+
 		return map[string]any{
 			"active":             active,
 			"debugKey":           "",
@@ -606,6 +628,19 @@ func (c *Client) UpdateDDNS(ctx context.Context, active bool, cfg DDNSConfigurat
 		return nil, err
 	}
 	return &result, nil
+}
+
+// DisableDDNS turns the DDNS client off while retaining the stored
+// configuration (provider selection, account fields, hostname and URL).
+func (c *Client) DisableDDNS(ctx context.Context) error {
+	current, err := c.GetDDNS(ctx)
+	if err != nil {
+		return err
+	}
+	cfg := current.Configuration
+	cfg.Password = "" // preserved by UpdateDDNS
+	_, err = c.UpdateDDNS(ctx, false, cfg)
+	return err
 }
 
 // --- DMZ -------------------------------------------------------------------

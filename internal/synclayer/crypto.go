@@ -1,12 +1,15 @@
 package synclayer
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/sha512"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"strings"
 
 	"golang.org/x/crypto/pbkdf2"
 )
@@ -84,13 +87,52 @@ func EncodeDDNSPassword(accessToken, userName, password string) (string, error) 
 	return base64.StdEncoding.EncodeToString([]byte(text)), nil
 }
 
-// zeroPad pads data with zero bytes to the next multiple of blockSize. Like
-// crypto-js ZeroPadding, it appends a whole block when data is already aligned.
-func zeroPad(data []byte, blockSize int) []byte {
-	padding := blockSize - (len(data) % blockSize)
-	if padding == 0 {
-		padding = blockSize
+// DecodeDDNSPassword reverses EncodeDDNSPassword. It is used to read back the
+// credential the device stores (GET /service/ddns returns it in the same
+// "HS\x0e<user>\x0e<hex>" envelope, encrypted with the current session token)
+// so that an unrelated update or a destroy does not wipe it.
+func DecodeDDNSPassword(accessToken, encoded string) (string, error) {
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return "", fmt.Errorf("decoding DDNS password envelope: %w", err)
 	}
+
+	parts := strings.SplitN(string(raw), passwordSeparator, 3)
+	if len(parts) != 3 || parts[0]+passwordSeparator != passwordPrefix {
+		return "", errors.New("unexpected DDNS password envelope")
+	}
+
+	ciphertext, err := hex.DecodeString(parts[2])
+	if err != nil {
+		return "", fmt.Errorf("decoding DDNS password ciphertext: %w", err)
+	}
+	if len(ciphertext) == 0 || len(ciphertext)%aes.BlockSize != 0 {
+		return "", fmt.Errorf("invalid DDNS password ciphertext length %d", len(ciphertext))
+	}
+
+	key := accessToken
+	if len(key) > ddnsKeyLength {
+		key = key[:ddnsKeyLength]
+	}
+	if len(key) != 16 && len(key) != 24 && len(key) != 32 {
+		return "", fmt.Errorf("access token is too short to derive an AES key (%d characters)", len(key))
+	}
+
+	block, err := aes.NewCipher([]byte(key))
+	if err != nil {
+		return "", fmt.Errorf("creating AES cipher: %w", err)
+	}
+
+	plaintext := make([]byte, len(ciphertext))
+	cipher.NewCBCDecrypter(block, []byte(ddnsIV)).CryptBlocks(plaintext, ciphertext)
+
+	return string(bytes.TrimRight(plaintext, "\x00")), nil
+}
+
+// zeroPad pads data with zero bytes to the next multiple of blockSize. Like
+// crypto-js ZeroPadding, it adds nothing when data is already aligned.
+func zeroPad(data []byte, blockSize int) []byte {
+	padding := (blockSize - len(data)%blockSize) % blockSize
 	out := make([]byte, len(data)+padding)
 	copy(out, data)
 	return out

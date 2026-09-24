@@ -39,19 +39,19 @@ func resourceStaticRoute() *schema.Resource {
 			"destination_ip": {
 				Type:         schema.TypeString,
 				Required:     true,
-				ValidateFunc: validation.IsIPAddress,
+				ValidateFunc: validation.IsIPv4Address,
 				Description:  "Destination IPv4 network address.",
 			},
 			"subnet": {
 				Type:         schema.TypeString,
 				Required:     true,
-				ValidateFunc: validation.IsIPAddress,
+				ValidateFunc: validation.IsIPv4Address,
 				Description:  "Destination subnet mask, e.g. `255.255.255.0`.",
 			},
 			"gateway": {
 				Type:         schema.TypeString,
 				Required:     true,
-				ValidateFunc: validation.IsIPAddress,
+				ValidateFunc: validation.IsIPv4Address,
 				Description:  "Next-hop IPv4 address. Must be inside the LAN.",
 			},
 			"interface": {

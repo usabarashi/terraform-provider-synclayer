@@ -26,22 +26,58 @@ func TestEncodeLoginPassword(t *testing.T) {
 // The DDNS vector exercises the AES-128-CBC (zero padded) envelope keyed with
 // the first 16 characters of the access token.
 func TestEncodeDDNSPassword(t *testing.T) {
+	cases := []struct {
+		name     string
+		password string
+		want     string
+	}{
+		{
+			// 14 bytes: padded with two zero bytes.
+			name:     "unaligned",
+			password: "synthetic-ddns",
+			// AES-128-CBC(key="unit-test-access", iv="0123456789012345",
+			//            zeroPad("synthetic-ddns")) =
+			//   3d2f31b4b7f29c58192b72fe34e9cd4d
+			want: "SFMOZGRuc3VzZXIOM2QyZjMxYjRiN2YyOWM1ODE5MmI3MmZlMzRlOWNkNGQ=",
+		},
+		{
+			// 16 bytes: exactly one block. crypto-js ZeroPadding adds nothing
+			// here, so the ciphertext is a single block (not two).
+			name:     "aligned",
+			password: "aligned-password",
+			// AES-128-CBC(key="unit-test-access", iv="0123456789012345",
+			//            "aligned-password") =
+			//   b57313a061087b285360caed31c21af9
+			want: "SFMOZGRuc3VzZXIOYjU3MzEzYTA2MTA4N2IyODUzNjBjYWVkMzFjMjFhZjk=",
+		},
+	}
+
 	const (
 		accessToken = "unit-test-access-token"
 		userName    = "ddnsuser"
-		password    = "synthetic-ddns"
-		// AES-128-CBC(key="unit-test-access", iv="0123456789012345",
-		//            zeroPad("synthetic-ddns")) =
-		//   3d2f31b4b7f29c58192b72fe34e9cd4d
-		want = "SFMOZGRuc3VzZXIOM2QyZjMxYjRiN2YyOWM1ODE5MmI3MmZlMzRlOWNkNGQ="
 	)
 
-	got, err := EncodeDDNSPassword(accessToken, userName, password)
-	if err != nil {
-		t.Fatalf("EncodeDDNSPassword returned error: %v", err)
-	}
-	if got != want {
-		t.Fatalf("EncodeDDNSPassword() mismatch\n got: %s\nwant: %s", got, want)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := EncodeDDNSPassword(accessToken, userName, tc.password)
+			if err != nil {
+				t.Fatalf("EncodeDDNSPassword returned error: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("EncodeDDNSPassword() mismatch\n got: %s\nwant: %s", got, tc.want)
+			}
+
+			// The device stores and returns the envelope verbatim, so decoding
+			// it must recover the original password (also covers the aligned
+			// case, where a stray block would be visible).
+			decoded, err := DecodeDDNSPassword(accessToken, got)
+			if err != nil {
+				t.Fatalf("DecodeDDNSPassword returned error: %v", err)
+			}
+			if decoded != tc.password {
+				t.Fatalf("DecodeDDNSPassword() = %q, want %q", decoded, tc.password)
+			}
+		})
 	}
 
 	empty, err := EncodeDDNSPassword(accessToken, userName, "")
@@ -50,6 +86,15 @@ func TestEncodeDDNSPassword(t *testing.T) {
 	}
 	if empty != "" {
 		t.Fatalf("EncodeDDNSPassword(empty) = %q, want empty string", empty)
+	}
+}
+
+func TestDecodeDDNSPasswordRejectsGarbage(t *testing.T) {
+	if _, err := DecodeDDNSPassword("unit-test-access-token", "not-base64!!"); err == nil {
+		t.Fatal("DecodeDDNSPassword() should reject an invalid envelope")
+	}
+	if _, err := DecodeDDNSPassword("short", "SFMOdXNlcg5hYmNkZWY="); err == nil {
+		t.Fatal("DecodeDDNSPassword() should reject a short access token")
 	}
 }
 

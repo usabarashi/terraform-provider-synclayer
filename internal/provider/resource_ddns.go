@@ -212,9 +212,10 @@ func resourceDdnsDelete(ctx context.Context, d *schema.ResourceData, meta interf
 		return diags
 	}
 
-	// Disabling DDNS is the closest thing to deletion this device offers. The
-	// configuration is cleared; that is acceptable for a destroy operation.
-	if _, err := client.UpdateDDNS(ctx, false, synclayer.DDNSConfiguration{}); err != nil {
+	// Disabling DDNS is the closest thing to deletion this device offers. Keep
+	// the stored configuration (including the password, which cannot be read
+	// back into Terraform) so a destroy only turns the client off.
+	if err := client.DisableDDNS(ctx); err != nil {
 		return diag.FromErr(err)
 	}
 	d.SetId("")

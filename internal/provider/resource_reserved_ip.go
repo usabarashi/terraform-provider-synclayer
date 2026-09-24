@@ -43,7 +43,7 @@ func resourceReservedIP() *schema.Resource {
 			"ip_address": {
 				Type:         schema.TypeString,
 				Required:     true,
-				ValidateFunc: validation.IsIPAddress,
+				ValidateFunc: validation.IsIPv4Address,
 				Description:  "IPv4 address to assign to the client.",
 			},
 			"device_name": {

@@ -41,7 +41,7 @@ func resourcePortForwarding() *schema.Resource {
 			"ip_address": {
 				Type:         schema.TypeString,
 				Required:     true,
-				ValidateFunc: validation.IsIPAddress,
+				ValidateFunc: validation.IsIPv4Address,
 				Description:  "LAN IPv4 address that receives the forwarded traffic.",
 			},
 			"protocol": {

@@ -39,7 +39,7 @@ func resourceDMZ() *schema.Resource {
 				Type:         schema.TypeString,
 				Optional:     true,
 				Computed:     true,
-				ValidateFunc: validation.IsIPAddress,
+				ValidateFunc: validation.IsIPv4Address,
 				Description: "LAN IPv4 address that receives all unsolicited inbound traffic. " +
 					"Meaningful when `active` is true; the device reports `0.0.0.0` while disabled.",
 			},
@@ -47,7 +47,7 @@ func resourceDMZ() *schema.Resource {
 				Type:         schema.TypeString,
 				Optional:     true,
 				Computed:     true,
-				ValidateFunc: validation.IsIPAddress,
+				ValidateFunc: validation.IsIPv4Address,
 				Description:  "Subnet mask associated with the destination.",
 			},
 		},

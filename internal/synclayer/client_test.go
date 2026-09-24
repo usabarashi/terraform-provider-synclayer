@@ -1,12 +1,7 @@
 package synclayer
 
 import (
-	"bytes"
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -33,7 +28,12 @@ type fakeDevice struct {
 	// DDNS support
 	rejectNextDDNS bool
 	ddnsPasswords  []string // plaintext recovered from received PUT bodies
-	ddnsExpectUser string
+	ddnsStored     string   // envelope stored by the device (returned on GET)
+	ddnsActive     bool
+	ddnsProvider   int
+	ddnsUsername   string
+	ddnsHostname   string
+	ddnsURL        string
 
 	loginCount int
 	expectUser string
@@ -144,8 +144,10 @@ func (f *fakeDevice) handler() http.Handler {
 		}
 		switch r.Method {
 		case http.MethodGet:
+			f.mu.Lock()
+			defer f.mu.Unlock()
 			writeJSON(w, map[string]any{
-				"active": false,
+				"active": f.ddnsActive,
 				"result": map[string]any{"connectionStatus": "", "returnCode": 0, "ipAddress": "-"},
 				"supportingProvider": []map[string]any{
 					{"name": "DynDNS", "url": "members.dyndns.org", "domainName": []string{"dyndns.org"}},
@@ -153,15 +155,20 @@ func (f *fakeDevice) handler() http.Handler {
 					{"name": "User Define", "url": "", "domainName": []string{""}},
 				},
 				"configuration": map[string]any{
-					"currentProvider": 0, "username": "", "password": "", "token": "",
-					"hostname": "", "url": "members.dyndns.org",
+					"currentProvider": f.ddnsProvider, "username": f.ddnsUsername,
+					"password": f.ddnsStored, "token": "",
+					"hostname": f.ddnsHostname, "url": f.ddnsURL,
 				},
 			})
 		case http.MethodPut:
 			var body struct {
+				Active        bool `json:"active"`
 				Configuration struct {
-					Username string `json:"username"`
-					Password string `json:"password"`
+					CurrentProvider int    `json:"currentProvider"`
+					Username        string `json:"username"`
+					Password        string `json:"password"`
+					Hostname        string `json:"hostname"`
+					URL             string `json:"url"`
 				} `json:"configuration"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -169,24 +176,33 @@ func (f *fakeDevice) handler() http.Handler {
 				return
 			}
 
-			// The password must be decryptable with the token presented in the
-			// same request.
-			plain, err := decodeDDNSPassword(r.Header.Get("Access-Token"), body.Configuration.Username, body.Configuration.Password)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
+			// A non-empty password must be decryptable with the token presented
+			// in the same request.
+			plain := ""
+			if body.Configuration.Password != "" {
+				var err error
+				plain, err = DecodeDDNSPassword(r.Header.Get("Access-Token"), body.Configuration.Password)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
 			}
 
 			f.mu.Lock()
+			defer f.mu.Unlock()
 			if f.rejectNextDDNS {
 				f.rejectNextDDNS = false
-				f.mu.Unlock()
 				w.WriteHeader(http.StatusUnauthorized)
 				writeJSON(w, map[string]any{"error": map[string]any{"code": 2003, "type": "invalid_token", "message": "Invalid token"}})
 				return
 			}
 			f.ddnsPasswords = append(f.ddnsPasswords, plain)
-			f.mu.Unlock()
+			f.ddnsStored = body.Configuration.Password
+			f.ddnsActive = body.Active
+			f.ddnsProvider = body.Configuration.CurrentProvider
+			f.ddnsUsername = body.Configuration.Username
+			f.ddnsHostname = body.Configuration.Hostname
+			f.ddnsURL = body.Configuration.URL
 
 			writeJSON(w, map[string]any{"connectionStatus": "ok", "returnCode": 0, "ipAddress": "203.0.113.1"})
 		}
@@ -404,41 +420,6 @@ func TestInvalidateTokenOnlyClearsMatching(t *testing.T) {
 	}
 }
 
-// decodeDDNSPassword is a test-only inverse of EncodeDDNSPassword. It mimics
-// what the firmware does: derive the AES key from the request's access token
-// and unwrap "HS\x0e<user>\x0e<hex>" after base64 decoding.
-func decodeDDNSPassword(accessToken, userName, encoded string) (string, error) {
-	raw, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
-		return "", fmt.Errorf("base64 decode: %w", err)
-	}
-
-	prefix := "HS\x0e" + userName + "\x0e"
-	if !strings.HasPrefix(string(raw), prefix) {
-		return "", fmt.Errorf("missing password envelope")
-	}
-	ciphertext, err := hex.DecodeString(string(raw)[len(prefix):])
-	if err != nil {
-		return "", fmt.Errorf("hex decode: %w", err)
-	}
-	if len(ciphertext) == 0 || len(ciphertext)%aes.BlockSize != 0 {
-		return "", fmt.Errorf("invalid ciphertext length %d", len(ciphertext))
-	}
-
-	key := accessToken
-	if len(key) > 16 {
-		key = key[:16]
-	}
-	block, err := aes.NewCipher([]byte(key))
-	if err != nil {
-		return "", fmt.Errorf("aes cipher: %w", err)
-	}
-	plaintext := make([]byte, len(ciphertext))
-	cipher.NewCBCDecrypter(block, []byte("0123456789012345")).CryptBlocks(plaintext, ciphertext)
-
-	return string(bytes.TrimRight(plaintext, "\x00")), nil
-}
-
 // TestClientRefusesCrossOriginRedirect ensures the device session token is not
 // forwarded when an endpoint redirects to a different origin.
 func TestClientRefusesCrossOriginRedirect(t *testing.T) {
@@ -478,5 +459,87 @@ func TestClientRefusesCrossOriginRedirect(t *testing.T) {
 	}
 	if leaked.Load() {
 		t.Fatal("Access-Token was forwarded to a different origin")
+	}
+}
+
+// TestUpdateDDNSKeepsStoredPassword ensures an update that does not supply a
+// password (for example after terraform import) does not wipe the credential
+// the device already stores.
+func TestUpdateDDNSKeepsStoredPassword(t *testing.T) {
+	dev := newFakeDevice("admin", "s3cret")
+	srv := httptest.NewServer(dev.handler())
+	defer srv.Close()
+
+	client, err := NewClient(Config{BaseURL: srv.URL, Username: "admin", Password: "s3cret"})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	ctx := context.Background()
+
+	if _, err := client.UpdateDDNS(ctx, true, DDNSConfiguration{
+		CurrentProvider: 0, Username: "ddnsuser", Password: "top-secret", Hostname: "a.example.com",
+	}); err != nil {
+		t.Fatalf("initial UpdateDDNS: %v", err)
+	}
+
+	// Second update without a password must recover and re-send the stored one.
+	if _, err := client.UpdateDDNS(ctx, true, DDNSConfiguration{
+		CurrentProvider: 0, Username: "ddnsuser", Hostname: "b.example.com",
+	}); err != nil {
+		t.Fatalf("update without password: %v", err)
+	}
+
+	dev.mu.Lock()
+	defer dev.mu.Unlock()
+	if len(dev.ddnsPasswords) != 2 {
+		t.Fatalf("expected 2 accepted DDNS requests, got %d", len(dev.ddnsPasswords))
+	}
+	for i, got := range dev.ddnsPasswords {
+		if got != "top-secret" {
+			t.Fatalf("request %d password = %q, want %q (credential was not preserved)", i, got, "top-secret")
+		}
+	}
+	if dev.ddnsStored == "" {
+		t.Fatal("stored password was cleared")
+	}
+	if dev.ddnsHostname != "b.example.com" {
+		t.Fatalf("hostname not updated: %q", dev.ddnsHostname)
+	}
+}
+
+// TestDisableDDNSRetainsConfiguration ensures destroy only disables the client
+// and keeps the stored account configuration.
+func TestDisableDDNSRetainsConfiguration(t *testing.T) {
+	dev := newFakeDevice("admin", "s3cret")
+	srv := httptest.NewServer(dev.handler())
+	defer srv.Close()
+
+	client, err := NewClient(Config{BaseURL: srv.URL, Username: "admin", Password: "s3cret"})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	ctx := context.Background()
+
+	if _, err := client.UpdateDDNS(ctx, true, DDNSConfiguration{
+		CurrentProvider: 2, Username: "ddnsuser", Password: "top-secret",
+		Hostname: "a.example.com", URL: "updates.example.com",
+	}); err != nil {
+		t.Fatalf("initial UpdateDDNS: %v", err)
+	}
+
+	if err := client.DisableDDNS(ctx); err != nil {
+		t.Fatalf("DisableDDNS: %v", err)
+	}
+
+	dev.mu.Lock()
+	defer dev.mu.Unlock()
+	if dev.ddnsActive {
+		t.Fatal("DDNS is still active")
+	}
+	if dev.ddnsStored == "" {
+		t.Fatal("DisableDDNS cleared the stored password")
+	}
+	if dev.ddnsUsername != "ddnsuser" || dev.ddnsHostname != "a.example.com" || dev.ddnsURL != "updates.example.com" || dev.ddnsProvider != 2 {
+		t.Fatalf("DisableDDNS cleared configuration: %+v", dev)
 	}
 }

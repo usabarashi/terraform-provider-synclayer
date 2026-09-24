@@ -2,13 +2,7 @@
 
 language: "en-US"
 
-tone_instructions: |
-  Be concise and direct. This is an unofficial Go Terraform provider
-  (terraform-plugin-sdk/v2) for SyncLayer home gateways. The provider is scoped
-  to the manufacturer; resources and data sources are namespaced by product
-  (synclayer_sxep200w_*). The device REST API was reverse-engineered from
-  firmware, so prioritize correctness, state/plan consistency, and idempotency
-  over stylistic nits.
+tone_instructions: "Concise, direct reviews. Unofficial Go Terraform provider (terraform-plugin-sdk/v2) for SyncLayer gateways; provider is manufacturer-scoped, resources are product-namespaced (synclayer_sxep200w_*). Focus on correctness and plan/apply idempotency."
 
 early_access: false
 
