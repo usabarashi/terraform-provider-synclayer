@@ -30,3 +30,6 @@ override.tf.json
 # Local secrets
 *.auto.tfvars
 .env
+
+# Local PR description draft (github-pull-request-describe artifact)
+pr-description.md

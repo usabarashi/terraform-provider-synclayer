@@ -1,0 +1,49 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  ci:
+    uses: ./.github/workflows/test.yml
+
+  release:
+    runs-on: ubuntu-latest
+    needs: [ci]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+
+      - name: Import GPG key
+        run: echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
+
+      - uses: goreleaser/goreleaser-action@9ed2f89a662bf1735a48bc8557fd212fa902bebf # v6.3.0
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GPG_FINGERPRINT: ${{ secrets.GPG_FINGERPRINT }}
+
+      - uses: dcarbone/tfcloud-provider-push-action@04543a55d925f7cfbfc79f0c0e374a9253728ea5 # v0.3.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TF_TOKEN: ${{ secrets.TFC_TOKEN }}
+          TF_GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
+          TF_REGISTRY_NAME: private
+          TF_ORGANIZATION_NAME: usabarashi
+          TF_NAMESPACE: usabarashi
+          TF_PROVIDER_NAME: synclayer
+          # terraform-plugin-sdk/v2 serves protocol 5.0. Unlike the framework-based
+          # providers (apc, sei) which use the action default of 6.0, this must be
+          # set explicitly or terraform init/runs will fail with a protocol mismatch.
+          TF_PROVIDER_PLATFORMS: "5.0"

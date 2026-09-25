@@ -6,6 +6,11 @@ by product (`sxep200w` for the SXEP200W GPON gateway). It drives the device's
 local web management REST API (`/api/v1/...`) so that port forwarding, static
 routes, DHCP reservations, DDNS and DMZ can be managed as code.
 
+> **Status: pre-1.0 / experimental.** Interfaces and resource schemas may change
+> without notice, and the provider has not yet been validated against many
+> firmware revisions. Pin the version (`~> 0.1.0`) and try it on a non-critical
+> device first.
+
 > The provider authenticates against the same endpoint the web UI uses. Field
 > names and behaviours may differ between firmware revisions.
 
