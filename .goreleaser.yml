@@ -1,0 +1,39 @@
+version: 2
+
+builds:
+  - main: .
+    binary: "terraform-provider-synclayer_v{{ .Version }}"
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - formats: [zip]
+    name_template: "terraform-provider-synclayer_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "terraform-provider-synclayer_{{ .Version }}_SHA256SUMS"
+  algorithm: sha256
+
+signs:
+  - artifacts: checksum
+    args:
+      - "--batch"
+      - "--local-user"
+      - "{{ .Env.GPG_FINGERPRINT }}"
+      - "--output"
+      - "${signature}"
+      - "--detach-sign"
+      - "${artifact}"
+
+release:
+  draft: false
