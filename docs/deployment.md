@@ -43,17 +43,20 @@ Registry at no cost.
 
 ### Provider Source
 
-With the Private Registry, the `source` changes from the local development form:
+Local development resolves the short source:
 
 ```hcl
-# Local development (dev_overrides)
 terraform {
   required_providers {
     synclayer = { source = "usabarashi/synclayer" }
   }
 }
+```
 
-# Private Registry
+With the Private Registry, the `source` becomes the full registry address. Use one
+or the other in a module, not both:
+
+```hcl
 terraform {
   required_version = ">= 1.5"
 
@@ -151,8 +154,28 @@ The agent only needs:
 
 1. Create a **Workspace** with execution mode "Agent" and select an agent pool whose
    agents run inside the LAN.
-2. Configure workspace variables for provider configuration: `synclayer_host`
-   (`http://<device-ip>`), `synclayer_username`, `synclayer_password` (sensitive).
+2. Configure the provider inputs. Either add workspace **environment** variables
+   `SYNCLAYER_HOST` (`http://<device-ip>`), `SYNCLAYER_USERNAME` and
+   `SYNCLAYER_PASSWORD` (which the provider reads when the matching arguments are
+   omitted), or declare Terraform variables and pass them explicitly:
+
+   ```hcl
+   variable "synclayer_host" { type = string }
+   variable "synclayer_username" { type = string }
+   variable "synclayer_password" {
+     type      = string
+     sensitive = true
+   }
+
+   provider "synclayer" {
+     host     = var.synclayer_host
+     username = var.synclayer_username
+     password = var.synclayer_password
+   }
+   ```
+
+   With the explicit form, create the workspace variables as **Terraform**
+   category variables so they are exposed as `TF_VAR_synclayer_*`.
 3. Terraform state is stored and managed by HCP Terraform; the agent retains no
    state locally.
 
