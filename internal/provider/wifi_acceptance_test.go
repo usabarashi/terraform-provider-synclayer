@@ -1,10 +1,12 @@
 package provider
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"sync"
 	"testing"
 
@@ -19,13 +21,15 @@ import (
 // handshake, GET/PUT of one SSID, and the token-keyed PSK envelope the device
 // uses (verified on VER-01.06.05-EA).
 type wifiFake struct {
-	mu         sync.Mutex
-	webKey     string
-	token      string
-	tokenSeq   int
-	name       string
-	password   string
-	hiddenSSID bool
+	mu          sync.Mutex
+	webKey      string
+	token       string
+	tokenSeq    int
+	name        string
+	password    string
+	hiddenSSID  bool
+	clientLimit int
+	active      bool
 
 	radioActive    bool
 	radioChannel   string
@@ -37,16 +41,18 @@ func newWifiFake() *wifiFake {
 		webKey:         "test-web-key",
 		name:           "initial",
 		password:       "stored-psk",
+		clientLimit:    75,
+		active:         true,
 		radioActive:    true,
 		radioChannel:   "auto",
 		radioBandwidth: "40",
 	}
 }
 
-func (f *wifiFake) state() (name, password string, hidden bool) {
+func (f *wifiFake) state() (name, password string, hidden, active bool, clientLimit int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.name, f.password, f.hiddenSSID
+	return f.name, f.password, f.hiddenSSID, f.active, f.clientLimit
 }
 
 func (f *wifiFake) auth(w http.ResponseWriter, r *http.Request) bool {
@@ -87,7 +93,9 @@ func (f *wifiFake) handler() http.Handler {
 		_ = json.NewEncoder(w).Encode(map[string]any{"accessToken": f.token, "expiresIn": 1200})
 	})
 
-	mux.HandleFunc("/api/v1/wifi/0/ssid/0", func(w http.ResponseWriter, r *http.Request) {
+	// One SSID slot is served at 2.4g/0; the extra slot the restriction is about
+	// (5g/2) is served too, so the cleanup path can be exercised.
+	ssidHandler := func(w http.ResponseWriter, r *http.Request) {
 		if !f.auth(w, r) {
 			return
 		}
@@ -103,10 +111,10 @@ func (f *wifiFake) handler() http.Handler {
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"index": 0, "active": true, "type": "primary", "name": f.name,
+				"index": 0, "active": f.active, "type": "primary", "name": f.name,
 				"macAddress": "02:00:00:00:00:10", "accessControl": false, "hiddenSSID": f.hiddenSSID,
 				"APIsolate": false, "webUIAccess": true, "internetOnly": false, "wmf": true, "ft": false,
-				"numClient": map[string]any{"max": 75, "set": 75},
+				"numClient": map[string]any{"max": 75, "set": f.clientLimit},
 				"security": map[string]any{
 					"type":     "WPA2-PSK",
 					"personal": map[string]any{"password": password, "encryption": "AES", "groupKey": 1800},
@@ -121,6 +129,10 @@ func (f *wifiFake) handler() http.Handler {
 			}
 			f.name = body.Name
 			f.hiddenSSID = body.HiddenSSID
+			f.active = body.Active
+			if body.NumClient.Set != 0 {
+				f.clientLimit = body.NumClient.Set
+			}
 			if body.Security.Personal != nil && body.Security.Personal.Password != "" {
 				plain, err := synclayer.DecodeDDNSPassword(f.token, body.Security.Personal.Password)
 				if err != nil {
@@ -136,7 +148,9 @@ func (f *wifiFake) handler() http.Handler {
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
-	})
+	}
+	mux.HandleFunc("/api/v1/wifi/0/ssid/0", ssidHandler)
+	mux.HandleFunc("/api/v1/wifi/1/ssid/2", ssidHandler)
 
 	mux.HandleFunc("/api/v1/wifi/0/radio", func(w http.ResponseWriter, r *http.Request) {
 		if !f.auth(w, r) {
@@ -190,14 +204,20 @@ func TestWifiSSIDPartialUpdate(t *testing.T) {
 	t.Setenv("SYNCLAYER_USERNAME", "admin")
 	t.Setenv("SYNCLAYER_PASSWORD", "s3cret")
 
-	checkState := func(name string, hidden bool) resource.TestCheckFunc {
+	checkState := func(name string, hidden, active bool, clientLimit int) resource.TestCheckFunc {
 		return func(_ *terraform.State) error {
-			gotName, gotPassword, gotHidden := f.state()
+			gotName, gotPassword, gotHidden, gotActive, gotClientLimit := f.state()
 			if gotName != name {
 				return fmt.Errorf("device name = %q, want %q", gotName, name)
 			}
 			if gotHidden != hidden {
 				return fmt.Errorf("device hidden = %v, want %v", gotHidden, hidden)
+			}
+			if gotActive != active {
+				return fmt.Errorf("device active = %v, want %v", gotActive, active)
+			}
+			if gotClientLimit != clientLimit {
+				return fmt.Errorf("device client limit = %d, want %d", gotClientLimit, clientLimit)
 			}
 			if gotPassword != "stored-psk" {
 				return fmt.Errorf("device PSK = %q, want %q (must be preserved)", gotPassword, "stored-psk")
@@ -210,6 +230,17 @@ func TestWifiSSIDPartialUpdate(t *testing.T) {
 		ProviderFactories: map[string]func() (*schema.Provider, error){
 			"synclayer": func() (*schema.Provider, error) { return New(), nil },
 		},
+		CheckDestroy: func(_ *terraform.State) error {
+			// Destroying the resource disables the SSID and keeps the PSK.
+			_, gotPassword, _, gotActive, _ := f.state()
+			if gotActive {
+				return fmt.Errorf("SSID is still active after destroy")
+			}
+			if gotPassword != "stored-psk" {
+				return fmt.Errorf("PSK changed on destroy: %q", gotPassword)
+			}
+			return nil
+		},
 		Steps: []resource.TestStep{
 			{
 				// Only some attributes are set: the rest keep their device value
@@ -220,7 +251,7 @@ resource "synclayer_sxep200w_wifi_ssid" "t" {
   index = 0
   name  = "first"
 }`,
-				Check: checkState("first", false),
+				Check: checkState("first", false, true, 75),
 			},
 			{
 				Config: `
@@ -230,7 +261,18 @@ resource "synclayer_sxep200w_wifi_ssid" "t" {
   name        = "second"
   hidden_ssid = true
 }`,
-				Check: checkState("second", true),
+				Check: checkState("second", true, true, 75),
+			},
+			{
+				Config: `
+resource "synclayer_sxep200w_wifi_ssid" "t" {
+  band         = "2.4g"
+  index        = 0
+  name         = "second"
+  hidden_ssid  = true
+  client_limit = 70
+}`,
+				Check: checkState("second", true, true, 70),
 			},
 			{
 				ResourceName:            "synclayer_sxep200w_wifi_ssid.t",
@@ -239,8 +281,62 @@ resource "synclayer_sxep200w_wifi_ssid" "t" {
 				ImportStateVerify:       true,
 				ImportStateVerifyIgnore: []string{"password"},
 			},
+			{
+				// Slots the web UI cannot operate must not be imported.
+				ResourceName:  "synclayer_sxep200w_wifi_ssid.t",
+				ImportState:   true,
+				ImportStateId: "5g/2",
+				ExpectError:   regexp.MustCompile("SSID index 2 is not manageable"),
+			},
 		},
 	})
+}
+
+func TestWifiSSIDCleanupPath(t *testing.T) {
+	// A slot managed before the restriction (e.g. 5g/2) must still be readable
+	// and deletable, so it can be removed from state by deleting its block.
+	f := newWifiFake()
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+
+	client, err := synclayer.NewClient(synclayer.Config{
+		BaseURL:  srv.URL,
+		Username: "admin",
+		Password: "s3cret",
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	ctx := context.Background()
+	if err := client.Login(ctx); err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	r := resourceWifiSSID()
+	d := schema.TestResourceDataRaw(t, r.Schema, nil)
+	d.SetId("5g/2")
+
+	if diags := resourceWifiSSIDRead(ctx, d, client); diags.HasError() {
+		t.Fatalf("read 5g/2: %v", diags)
+	}
+	if d.Id() == "" {
+		t.Fatal("read cleared the id unexpectedly")
+	}
+	if got := d.Get("name").(string); got != "initial" {
+		t.Errorf("read name = %q, want %q", got, "initial")
+	}
+
+	if diags := resourceWifiSSIDDelete(ctx, d, client); diags.HasError() {
+		t.Fatalf("delete 5g/2: %v", diags)
+	}
+	if d.Id() != "" {
+		t.Errorf("delete did not clear the id")
+	}
+	if _, password, _, active, _ := f.state(); active {
+		t.Errorf("deleting the slot should have disabled it")
+	} else if password != "stored-psk" {
+		t.Errorf("PSK changed while deleting: %q", password)
+	}
 }
 
 func TestWifiRadioLifecycle(t *testing.T) {

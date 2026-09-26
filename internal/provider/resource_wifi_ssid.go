@@ -28,7 +28,7 @@ func resourceWifiSSID() *schema.Resource {
 		DeleteContext: resourceWifiSSIDDelete,
 
 		Importer: &schema.ResourceImporter{
-			StateContext: schema.ImportStatePassthroughContext,
+			StateContext: importWifiSSID,
 		},
 
 		Schema: map[string]*schema.Schema{
@@ -134,6 +134,14 @@ func resourceWifiSSID() *schema.Resource {
 				Computed:    true,
 				Description: "Whether MAC access control is enabled for this SSID.",
 			},
+			"client_limit": {
+				Type:     schema.TypeInt,
+				Optional: true,
+				Computed: true,
+				// The device reports the ceiling in numClient.max (read-only) and
+				// the configured limit in numClient.set, which is what this maps to.
+				Description: "Maximum number of clients allowed on this SSID (the device's `numClient.set`).",
+			},
 			"mac_address": {
 				Type:        schema.TypeString,
 				Computed:    true,
@@ -179,10 +187,30 @@ func parseWifiSSIDID(id string) (int, int, error) {
 	if err != nil {
 		return 0, 0, fmt.Errorf("invalid SSID index %q: %w", parts[1], err)
 	}
-	if index != 0 && index != 1 {
-		return 0, 0, fmt.Errorf("SSID index %d is not manageable: only the primary (0) and secondary (1) slots are exposed by the device web UI", index)
+	if index < 0 {
+		return 0, 0, fmt.Errorf("invalid SSID index %d: must be >= 0", index)
 	}
+	// NOTE: the "only 0/1 is manageable" restriction deliberately lives in the
+	// config validation and in importWifiSSID, not here. Read/Delete also parse
+	// the id, so a slot managed before the restriction (e.g. 5g/2) can still be
+	// refreshed and removed from state once its block is deleted from the
+	// configuration (a config that still declares index >= 2 fails validation,
+	// as intended).
 	return band, index, nil
+}
+
+// importWifiSSID refuses new imports of slots the device web UI cannot operate.
+// A slot imported before this restriction can still be read and deleted through
+// the permissive parseWifiSSIDID.
+func importWifiSSID(_ context.Context, d *schema.ResourceData, _ interface{}) ([]*schema.ResourceData, error) {
+	_, index, err := parseWifiSSIDID(d.Id())
+	if err != nil {
+		return nil, err
+	}
+	if index != 0 && index != 1 {
+		return nil, fmt.Errorf("SSID index %d is not manageable: only the primary (0) and secondary (1) slots are exposed by the device web UI", index)
+	}
+	return []*schema.ResourceData{d}, nil
 }
 
 func resourceWifiSSIDUpsert(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
@@ -238,6 +266,9 @@ func resourceWifiSSIDUpsert(ctx context.Context, d *schema.ResourceData, meta in
 	}
 	if set, _ := attrConfigured(raw, "access_control"); set {
 		current.AccessControl = d.Get("access_control").(bool)
+	}
+	if set, _ := attrConfigured(raw, "client_limit"); set {
+		current.NumClient.Set = d.Get("client_limit").(int)
 	}
 	if set, _ := attrConfigured(raw, "security_type"); set {
 		current.Security.Type = d.Get("security_type").(string)
@@ -343,6 +374,9 @@ func resourceWifiSSIDRead(ctx context.Context, d *schema.ResourceData, meta inte
 		return diag.FromErr(err)
 	}
 	if err := d.Set("access_control", ssid.AccessControl); err != nil {
+		return diag.FromErr(err)
+	}
+	if err := d.Set("client_limit", ssid.NumClient.Set); err != nil {
 		return diag.FromErr(err)
 	}
 	if err := d.Set("mac_address", ssid.MACAddress); err != nil {
