@@ -67,6 +67,17 @@ gofmt -l .
   The returned `accessToken` is sent as the `Access-Token` header.
 - The DDNS password uses AES-128-CBC (zero padding, fixed IV, key = first 16
   chars of the access token).
+- The WiFi PSK uses the same token-keyed envelope. `GET /wifi/{band}/ssid` and
+  `GET /wifi/{band}/ssid/{index}` return it in that form, and `PUT` keeps the
+  envelope it is given. Verified on VER-01.06.05-EA: replaying the read envelope
+  preserves the PSK, while **omitting** the password field replaces it, so the
+  password must always be sent. Because the envelope is bound to the session
+  token, `GetWifiSSID` recovers the plaintext with the token that produced it so
+  an update can re-encode it with the token in use (a re-authentication between
+  the read and the write otherwise invalidates the envelope).
+- `GET /wifi/{band}/radio` answers **202** with a body, and includes a
+  `channelList` and `used` fields under `basic`; a `PUT` without them is accepted
+  (verified), so they are intentionally not carried through.
 - Some operations have firmware quirks: static route `PUT` deletes and
   re-creates the rule (a new id is assigned), port forwarding deletes via `POST`,
   and the device may override the DDNS `url` for built-in providers. The client
