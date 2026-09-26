@@ -40,11 +40,15 @@ func resourceWifiSSID() *schema.Resource {
 				Description:  "Radio band: `2.4g` or `5g`.",
 			},
 			"index": {
-				Type:         schema.TypeInt,
-				Required:     true,
-				ForceNew:     true,
-				ValidateFunc: validation.IntAtLeast(0),
-				Description:  "SSID slot index on the band (0 is primary).",
+				Type:     schema.TypeInt,
+				Required: true,
+				ForceNew: true,
+				// Only the primary (0) and secondary (1) slots are exposed by the
+				// device web UI. Some firmware revisions report additional slots
+				// (e.g. 5g/2), but the UI cannot operate them, so managing them
+				// here is refused.
+				ValidateFunc: validation.IntInSlice([]int{0, 1}),
+				Description:  "SSID slot index on the band: `0` (primary) or `1` (secondary).",
 			},
 			"active": {
 				Type:        schema.TypeBool,
@@ -175,8 +179,8 @@ func parseWifiSSIDID(id string) (int, int, error) {
 	if err != nil {
 		return 0, 0, fmt.Errorf("invalid SSID index %q: %w", parts[1], err)
 	}
-	if index < 0 {
-		return 0, 0, fmt.Errorf("invalid SSID index %d: must be >= 0", index)
+	if index != 0 && index != 1 {
+		return 0, 0, fmt.Errorf("SSID index %d is not manageable: only the primary (0) and secondary (1) slots are exposed by the device web UI", index)
 	}
 	return band, index, nil
 }
