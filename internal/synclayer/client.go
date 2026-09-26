@@ -186,7 +186,14 @@ type bodyBuilder func(token string) (interface{}, error)
 
 // request performs an authenticated request, re-authenticating once on 401.
 func (c *Client) request(ctx context.Context, method, path string, body, out interface{}) error {
-	return c.requestWithBody(ctx, method, path, func(string) (interface{}, error) {
+	_, err := c.requestWithToken(ctx, method, path, body, out)
+	return err
+}
+
+// requestWithToken is like request but also reports the access token used for
+// the successful attempt, for callers that derive keys from it.
+func (c *Client) requestWithToken(ctx context.Context, method, path string, body, out interface{}) (string, error) {
+	return c.requestWithBodyToken(ctx, method, path, func(string) (interface{}, error) {
 		return body, nil
 	}, out)
 }
@@ -194,18 +201,25 @@ func (c *Client) request(ctx context.Context, method, path string, body, out int
 // requestWithBody is like request but rebuilds the body for every attempt so
 // that token-derived payloads stay consistent with the token in use.
 func (c *Client) requestWithBody(ctx context.Context, method, path string, build bodyBuilder, out interface{}) error {
+	_, err := c.requestWithBodyToken(ctx, method, path, build, out)
+	return err
+}
+
+// requestWithBodyToken is requestWithBody plus the access token the request used
+// (the last attempt's, even when the request failed).
+func (c *Client) requestWithBodyToken(ctx context.Context, method, path string, build bodyBuilder, out interface{}) (string, error) {
 	token, err := c.tokenForRequest(ctx)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	body, err := build(token)
 	if err != nil {
-		return err
+		return "", err
 	}
 	err = c.rawRequest(ctx, method, path, token, body, out)
 	if !isUnauthorized(err) {
-		return err
+		return token, err
 	}
 
 	// Token was rejected. Discard it only if it is still the cached token:
@@ -216,13 +230,13 @@ func (c *Client) requestWithBody(ctx context.Context, method, path string, build
 
 	token, err = c.tokenForRequest(ctx)
 	if err != nil {
-		return err
+		return "", err
 	}
 	body, err = build(token)
 	if err != nil {
-		return err
+		return "", err
 	}
-	return c.rawRequest(ctx, method, path, token, body, out)
+	return token, c.rawRequest(ctx, method, path, token, body, out)
 }
 
 // invalidateToken clears the cached token only when it still matches rejected.

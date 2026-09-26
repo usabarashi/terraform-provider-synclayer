@@ -66,6 +66,8 @@ func New() *schema.Provider {
 			"synclayer_sxep200w_reserved_ip":     resourceReservedIP(),
 			"synclayer_sxep200w_ddns":            resourceDDNS(),
 			"synclayer_sxep200w_dmz":             resourceDMZ(),
+			"synclayer_sxep200w_wifi_ssid":       resourceWifiSSID(),
+			"synclayer_sxep200w_wifi_radio":      resourceWifiRadio(),
 		},
 
 		DataSourcesMap: map[string]*schema.Resource{

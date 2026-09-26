@@ -35,6 +35,11 @@ type fakeDevice struct {
 	ddnsHostname   string
 	ddnsURL        string
 
+	// WiFi support
+	wifiName        string
+	wifiPassword    string
+	wifiRadioActive bool
+
 	loginCount int
 	expectUser string
 	expectPass string
@@ -42,10 +47,12 @@ type fakeDevice struct {
 
 func newFakeDevice(user, pass string) *fakeDevice {
 	return &fakeDevice{
-		webKey:     "test-web-key",
-		nextID:     1,
-		expectUser: user,
-		expectPass: pass,
+		webKey:          "test-web-key",
+		nextID:          1,
+		expectUser:      user,
+		expectPass:      pass,
+		wifiName:        "test-ssid",
+		wifiRadioActive: true,
 	}
 }
 
@@ -71,8 +78,10 @@ func (f *fakeDevice) handler() http.Handler {
 			return
 		}
 		f.tokenSeq++
-		// The token must be long enough to derive a 16 byte AES key.
-		f.validToken = fmt.Sprintf("test-access-token-%016d", f.tokenSeq)
+		// The AES key is derived from the first 16 characters of the token, so
+		// the varying part must be at the front for re-authentication to change
+		// the key.
+		f.validToken = fmt.Sprintf("%016d-access-token", f.tokenSeq)
 		writeJSON(w, map[string]any{"accessToken": f.validToken, "expiresIn": 1200})
 	})
 	mux.HandleFunc("/api/v1/gateway/about", func(w http.ResponseWriter, r *http.Request) {
@@ -205,6 +214,99 @@ func (f *fakeDevice) handler() http.Handler {
 			f.ddnsURL = body.Configuration.URL
 
 			writeJSON(w, map[string]any{"connectionStatus": "ok", "returnCode": 0, "ipAddress": "203.0.113.1"})
+		}
+	})
+	mux.HandleFunc("/api/v1/wifi/0/ssid/0", func(w http.ResponseWriter, r *http.Request) {
+		if !f.auth(w, r) {
+			return
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		switch r.Method {
+		case http.MethodGet:
+			// The device returns the stored PSK as a token-keyed envelope, not
+			// plaintext (mirrors the real firmware).
+			password, err := EncodeDDNSPassword(r.Header.Get("Access-Token"), "admin", f.wifiPassword)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, map[string]any{
+				"index": 0, "active": false, "type": "primary", "name": f.wifiName,
+				"macAddress": "02:00:00:00:00:10", "accessControl": false, "hiddenSSID": false,
+				"APIsolate": false, "webUIAccess": true, "internetOnly": false, "wmf": true, "ft": false,
+				"numClient": map[string]any{"max": 75, "set": 75},
+				"security": map[string]any{
+					"type":     "WPA2-PSK",
+					"personal": map[string]any{"password": password, "encryption": "AES", "groupKey": 1800},
+					"mfp":      "capable",
+				},
+			})
+		case http.MethodPut:
+			raw, err := io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			var body WifiSSID
+			if err := json.Unmarshal(raw, &body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			// The typed decode cannot tell "key absent" from "empty", so check the
+			// raw object too.
+			var envelope struct {
+				Security struct {
+					Personal map[string]any `json:"personal"`
+				} `json:"security"`
+			}
+			_ = json.Unmarshal(raw, &envelope)
+
+			f.wifiName = body.Name
+			if pw, ok := envelope.Security.Personal["password"].(string); ok && pw != "" {
+				plain, err := DecodeDDNSPassword(r.Header.Get("Access-Token"), pw)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				f.wifiPassword = plain
+			} else {
+				// An absent or empty password field replaces the PSK on the real
+				// device (verified on VER-01.06.05-EA). Mirror that here so a
+				// regression to omitting the field fails the preserve test.
+				f.wifiPassword = ""
+			}
+			writeJSON(w, map[string]any{})
+		}
+	})
+	mux.HandleFunc("/api/v1/wifi/0/radio", func(w http.ResponseWriter, r *http.Request) {
+		if !f.auth(w, r) {
+			return
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		switch r.Method {
+		case http.MethodGet:
+			writeJSON(w, map[string]any{
+				"active": f.wifiRadioActive,
+				"basic": map[string]any{
+					"wirelessMode": "802.11b+g+n+ax",
+					"channel":      map[string]any{"set": "auto", "used": 1},
+					"outputPower":  "high",
+					"bandwidth":    map[string]any{"set": "40", "used": "20"},
+					"sideband":     "upper",
+				},
+				"advanced": map[string]any{},
+				"wmm":      map[string]any{"active": true},
+			})
+		case http.MethodPut:
+			var body WifiRadio
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			f.wifiRadioActive = body.Active
+			writeJSON(w, map[string]any{})
 		}
 	})
 	return mux
@@ -541,5 +643,115 @@ func TestDisableDDNSRetainsConfiguration(t *testing.T) {
 	}
 	if dev.ddnsUsername != "ddnsuser" || dev.ddnsHostname != "a.example.com" || dev.ddnsURL != "updates.example.com" || dev.ddnsProvider != 2 {
 		t.Fatalf("DisableDDNS cleared configuration: %+v", dev)
+	}
+}
+
+// TestClientWifi covers the SSID and radio endpoints, including that the SSID
+// password is obfuscated with the session token before it is sent.
+func TestClientWifi(t *testing.T) {
+	dev := newFakeDevice("admin", "s3cret")
+	srv := httptest.NewServer(dev.handler())
+	defer srv.Close()
+
+	client, err := NewClient(Config{BaseURL: srv.URL, Username: "admin", Password: "s3cret"})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	ctx := context.Background()
+
+	ssid, err := client.GetWifiSSID(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("GetWifiSSID: %v", err)
+	}
+	if ssid == nil || ssid.Name != "test-ssid" {
+		t.Fatalf("unexpected SSID: %+v", ssid)
+	}
+
+	ssid.Name = "renamed"
+	if err := client.UpdateWifiSSID(ctx, 0, 0, *ssid, "top-secret"); err != nil {
+		t.Fatalf("UpdateWifiSSID: %v", err)
+	}
+
+	dev.mu.Lock()
+	if dev.wifiName != "renamed" {
+		t.Errorf("SSID name not applied: %q", dev.wifiName)
+	}
+	if dev.wifiPassword != "top-secret" {
+		t.Errorf("SSID password was not encoded with the session token: %q", dev.wifiPassword)
+	}
+	dev.mu.Unlock()
+
+	// A 401 on the read must recover the PSK with the token that actually
+	// produced the envelope (the retried one), not the first attempt's.
+	dev.mu.Lock()
+	dev.rejectNext = true
+	dev.mu.Unlock()
+	retried, err := client.GetWifiSSID(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("GetWifiSSID (after 401): %v", err)
+	}
+	if retried.Security.Personal == nil || !retried.Security.Personal.PasswordRecovered {
+		t.Errorf("PSK was not recovered after a GET retry")
+	}
+
+	// An update without a password must keep the stored one: the device returns
+	// it as a token-keyed envelope, which the client recovers and re-encodes.
+	preserved, err := client.GetWifiSSID(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("GetWifiSSID (preserve): %v", err)
+	}
+	preserved.Name = "renamed-again"
+	if err := client.UpdateWifiSSID(ctx, 0, 0, *preserved, ""); err != nil {
+		t.Fatalf("UpdateWifiSSID (preserve): %v", err)
+	}
+	dev.mu.Lock()
+	if dev.wifiName != "renamed-again" {
+		t.Errorf("SSID name not applied on preserve update: %q", dev.wifiName)
+	}
+	if dev.wifiPassword != "top-secret" {
+		t.Errorf("stored password not preserved: %q", dev.wifiPassword)
+	}
+	dev.mu.Unlock()
+
+	// A re-authentication between the read and the write must not corrupt the
+	// PSK: GetWifiSSID recovers the password with the token that produced the
+	// envelope, and the update re-encodes it with the token in use.
+	reauthed, err := client.GetWifiSSID(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("GetWifiSSID (re-auth): %v", err)
+	}
+	dev.mu.Lock()
+	dev.rejectNext = true // force one 401 so the client re-authenticates
+	dev.mu.Unlock()
+
+	reauthed.Name = "renamed-after-auth"
+	if err := client.UpdateWifiSSID(ctx, 0, 0, *reauthed, ""); err != nil {
+		t.Fatalf("UpdateWifiSSID (re-auth): %v", err)
+	}
+	dev.mu.Lock()
+	if dev.wifiName != "renamed-after-auth" {
+		t.Errorf("SSID name not applied across re-auth: %q", dev.wifiName)
+	}
+	if dev.wifiPassword != "top-secret" {
+		t.Errorf("stored password corrupted across re-auth: %q", dev.wifiPassword)
+	}
+	dev.mu.Unlock()
+
+	radio, err := client.GetWifiRadio(ctx, 0)
+	if err != nil {
+		t.Fatalf("GetWifiRadio: %v", err)
+	}
+	if !radio.Active {
+		t.Fatal("expected radio to be active")
+	}
+	radio.Active = false
+	if err := client.UpdateWifiRadio(ctx, 0, *radio); err != nil {
+		t.Fatalf("UpdateWifiRadio: %v", err)
+	}
+
+	dev.mu.Lock()
+	defer dev.mu.Unlock()
+	if dev.wifiRadioActive {
+		t.Error("radio active flag not applied")
 	}
 }
