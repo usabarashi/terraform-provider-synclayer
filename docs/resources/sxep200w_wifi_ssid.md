@@ -34,8 +34,10 @@ variable "wifi_password" {
 
 - `band` (String, Required) Radio band: `2.4g` or `5g`. Changing this forces a
   new resource.
-- `index` (Number, Required) SSID slot index on the band (0 is the primary
-  network). Changing this forces a new resource.
+- `index` (Number, Required) SSID slot index on the band: `0` (primary) or `1`
+  (secondary). No other slots can be managed — the device reports extra slots
+  on some firmware revisions (e.g. `5g/2`) but its web UI does not expose them.
+  Changing this forces a new resource.
 - `name` (String, Required) Network name (SSID).
 - `password` (String, Optional, Sensitive) Pre-shared key. The device stores it
   as a token-keyed envelope and returns it on read; leave it unset to keep the
@@ -56,6 +58,8 @@ variable "wifi_password" {
 - `wmf` (Boolean, Optional) Wireless multicast forwarding.
 - `ft` (Boolean, Optional) 802.11r fast transition.
 - `access_control` (Boolean, Optional) Whether MAC access control is enabled.
+- `client_limit` (Number, Optional) Maximum number of clients allowed on the
+  SSID (the device's `numClient.set`).
 
 Fields that are not set are left at their current device value.
 
@@ -83,3 +87,12 @@ Import using `<band>/<index>`:
 ```sh
 terraform import synclayer_sxep200w_wifi_ssid.primary_5g 5g/0
 ```
+
+Only the primary (`0`) and secondary (`1`) slots can be imported — the device
+web UI does not expose any others (some firmware revisions report extra slots
+such as `5g/2`).
+
+If such a slot was imported before this restriction, remove its resource block
+from the configuration and run `terraform plan`/`apply`: it can no longer be
+validated (or refreshed) while the block declares `index >= 2`, but once the
+block is gone it is read and deleted, which disables that SSID on the device.

@@ -39,6 +39,7 @@ type fakeDevice struct {
 	wifiName        string
 	wifiPassword    string
 	wifiRadioActive bool
+	wifiClientLimit int
 
 	loginCount int
 	expectUser string
@@ -53,6 +54,7 @@ func newFakeDevice(user, pass string) *fakeDevice {
 		expectPass:      pass,
 		wifiName:        "test-ssid",
 		wifiRadioActive: true,
+		wifiClientLimit: 75,
 	}
 }
 
@@ -235,7 +237,7 @@ func (f *fakeDevice) handler() http.Handler {
 				"index": 0, "active": false, "type": "primary", "name": f.wifiName,
 				"macAddress": "02:00:00:00:00:10", "accessControl": false, "hiddenSSID": false,
 				"APIsolate": false, "webUIAccess": true, "internetOnly": false, "wmf": true, "ft": false,
-				"numClient": map[string]any{"max": 75, "set": 75},
+				"numClient": map[string]any{"max": 75, "set": f.wifiClientLimit},
 				"security": map[string]any{
 					"type":     "WPA2-PSK",
 					"personal": map[string]any{"password": password, "encryption": "AES", "groupKey": 1800},
@@ -263,6 +265,9 @@ func (f *fakeDevice) handler() http.Handler {
 			_ = json.Unmarshal(raw, &envelope)
 
 			f.wifiName = body.Name
+			if body.NumClient.Set != 0 {
+				f.wifiClientLimit = body.NumClient.Set
+			}
 			if pw, ok := envelope.Security.Personal["password"].(string); ok && pw != "" {
 				plain, err := DecodeDDNSPassword(r.Header.Get("Access-Token"), pw)
 				if err != nil {
