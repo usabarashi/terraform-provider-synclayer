@@ -346,10 +346,23 @@ func TestNetworkOptionsPartialWritesAndALG(t *testing.T) {
 			"synclayer": func() (*schema.Provider, error) { return New(), nil },
 		},
 		CheckDestroy: func(_ *terraform.State) error {
-			// This resource has no neutral value, so destroy leaves the device
-			// alone: the interval and the firewall must be untouched.
-			if f.upnp.Interval != 30 {
-				return fmt.Errorf("UPnP interval changed by an unrelated destroy: %d", f.upnp.Interval)
+			// This resource has no neutral value, so destroy must leave the
+			// device as the last apply left it, and must not write anything.
+			if f.options.NATTCPTimer != 7200 || !f.options.Multicast || f.options.NATUDPTimer != 300 {
+				return fmt.Errorf("destroy changed the network options: %+v", f.options)
+			}
+			if n := f.eventCount("options_put"); n != 2 {
+				return fmt.Errorf("destroy wrote the network options: options_put = %d", n)
+			}
+			enabled := make(map[string]bool, len(f.alg))
+			for _, entry := range f.alg {
+				enabled[entry.ServiceCode] = entry.Active
+			}
+			if !enabled["ftp"] || enabled["tftp"] || enabled["sip"] || enabled["rtsp"] {
+				return fmt.Errorf("destroy changed the helper list: %+v", f.alg)
+			}
+			if n := f.eventCount("alg_put"); n != 1 {
+				return fmt.Errorf("destroy wrote the ALG list: alg_put = %d", n)
 			}
 			return nil
 		},
