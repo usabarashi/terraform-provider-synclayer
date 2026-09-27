@@ -74,6 +74,8 @@ func New() *schema.Provider {
 			"synclayer_sxep200w_upnp":              resourceUPnP(),
 			"synclayer_sxep200w_static_route_ipv6": resourceStaticRouteIPv6(),
 			"synclayer_sxep200w_lan":               resourceLAN(),
+			"synclayer_sxep200w_packet_filtering":  resourcePacketFiltering(),
+			"synclayer_sxep200w_port_triggering":   resourcePortTriggering(),
 		},
 
 		DataSourcesMap: map[string]*schema.Resource{

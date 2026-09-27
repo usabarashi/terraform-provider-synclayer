@@ -43,6 +43,10 @@ type Client struct {
 	mu     sync.Mutex
 	token  string
 	expiry time.Time
+
+	// portTriggeringMu serialises the create-then-identify sequence for port
+	// triggering rules, whose ids the device does not report back.
+	portTriggeringMu sync.Mutex
 }
 
 // NewClient validates the configuration and returns a Client. It does not

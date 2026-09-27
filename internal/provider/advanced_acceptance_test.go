@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
@@ -38,6 +39,20 @@ type advancedFake struct {
 	routes  []synclayer.StaticRouteIPv6
 	lan     synclayer.LAN
 	nextID  int
+
+	// Packet filter rules per address family, and port triggering rules. The
+	// IPv4 family starts with one rule so tests can exercise the occupied
+	// priority path.
+	acRules  map[string][]synclayer.AccessControlRule
+	triggers []synclayer.PortTriggeringRule
+	nextTrig int
+
+	// acInterleave makes another writer take a packet filter priority right
+	// after the first read, and triggerDecoy makes a second port triggering
+	// rule appear between the reads that identify a created one.
+	acInterleave bool
+	acGets       int
+	triggerDecoy bool
 
 	// events records the writes the fake accepted, in order.
 	events []string
@@ -79,6 +94,15 @@ func newAdvancedFake() *advancedFake {
 			IPv6: map[string]any{"mode": "stateless"},
 		},
 		nextID: 10,
+		acRules: map[string][]synclayer.AccessControlRule{
+			"ipv4": {{
+				Index: 1, Active: true, Description: "", FilterType: "deny", Target: 1, Protocol: "tcp",
+				Src:  synclayer.AccessControlEndpoint{Type: "any", IPAddress: "", StartPort: 0, EndPort: 0},
+				Dest: synclayer.AccessControlEndpoint{Type: "any", IPAddress: "", StartPort: 137, EndPort: 139},
+			}},
+			"ipv6": {},
+		},
+		nextTrig: 1,
 	}
 }
 
@@ -270,6 +294,206 @@ func (f *advancedFake) handler() http.Handler {
 			// write carries, including the IPv6 block it does not expose.
 			f.lan = body
 			f.events = append(f.events, "lan_put")
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	})
+
+	mux.HandleFunc("/api/v1/security/accessControl", func(w http.ResponseWriter, r *http.Request) {
+		if !f.auth(w, r) {
+			return
+		}
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		f.mu.Lock()
+		defer f.mu.Unlock()
+
+		family := r.URL.Query().Get("filter")
+		if family != "ipv4" && family != "ipv6" {
+			http.Error(w, "unsupported filter", http.StatusBadRequest)
+			return
+		}
+		rules := f.acRules[family]
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			family: map[string]any{"active": true, "maxRules": 32, "rules": rules},
+		})
+
+		f.acGets++
+		if f.acInterleave && f.acGets == 1 {
+			// Another writer takes priority 20 between the checks the provider
+			// makes before writing.
+			f.acRules[family] = append(f.acRules[family], synclayer.AccessControlRule{
+				Index: 20, Active: true, Description: "someone else", FilterType: "deny", Protocol: "tcp",
+			})
+		}
+	})
+	mux.HandleFunc("/api/v1/security/accessControl/", func(w http.ResponseWriter, r *http.Request) {
+		if !f.auth(w, r) {
+			return
+		}
+
+		parts := strings.SplitN(r.URL.Path[len("/api/v1/security/accessControl/"):], "/", 2)
+		family := parts[0]
+		if family != "ipv4" && family != "ipv6" {
+			http.Error(w, "unsupported family", http.StatusBadRequest)
+			return
+		}
+
+		f.mu.Lock()
+		defer f.mu.Unlock()
+
+		drop := func(index int) {
+			kept := make([]synclayer.AccessControlRule, 0, len(f.acRules[family]))
+			for _, existing := range f.acRules[family] {
+				if existing.Index != index {
+					kept = append(kept, existing)
+				}
+			}
+			f.acRules[family] = kept
+		}
+
+		switch {
+		case len(parts) == 1 && r.Method == http.MethodPost:
+			var rule synclayer.AccessControlRule
+			if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			// The device replaces whatever sits at the index, and stores
+			// nothing at all when the rule is not active.
+			if !rule.Active {
+				_ = json.NewEncoder(w).Encode(map[string]any{})
+				return
+			}
+			drop(rule.Index)
+			f.acRules[family] = append(f.acRules[family], rule)
+			f.events = append(f.events, "access_control_create")
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		case len(parts) == 2 && r.Method == http.MethodPut:
+			index, err := strconv.Atoi(parts[1])
+			if err != nil {
+				http.Error(w, "invalid index", http.StatusBadRequest)
+				return
+			}
+			var rule synclayer.AccessControlRule
+			if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			// An index that is free is created; active=false removes the rule.
+			rule.Index = index
+			drop(index)
+			if rule.Active {
+				f.acRules[family] = append(f.acRules[family], rule)
+			}
+			f.events = append(f.events, "access_control_update")
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		case len(parts) == 2 && r.Method == http.MethodDelete:
+			index, err := strconv.Atoi(parts[1])
+			if err != nil {
+				http.Error(w, "invalid index", http.StatusBadRequest)
+				return
+			}
+			drop(index)
+			f.events = append(f.events, "access_control_delete")
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	})
+
+	mux.HandleFunc("/api/v1/service/portTriggering", func(w http.ResponseWriter, r *http.Request) {
+		if !f.auth(w, r) {
+			return
+		}
+
+		f.mu.Lock()
+		defer f.mu.Unlock()
+
+		switch r.Method {
+		case http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]any{"rules": f.triggers, "active": true, "maxRules": 10})
+		case http.MethodPost:
+			var rule synclayer.PortTriggeringRule
+			if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			rule.ID = f.nextTrig
+			f.nextTrig++
+			f.triggers = append(f.triggers, rule)
+			if f.triggerDecoy {
+				// Another create lands between the two reads.
+				f.triggers = append(f.triggers, synclayer.PortTriggeringRule{
+					ID:          f.nextTrig,
+					Active:      true,
+					Description: "someone else",
+					Triggered:   synclayer.PortTriggeringRange{Protocol: "udp", StartRange: 1234, EndRange: 1234},
+					Forwarded:   synclayer.PortTriggeringRange{Protocol: "udp", StartRange: 1235, EndRange: 1235},
+				})
+				f.nextTrig++
+			}
+			f.events = append(f.events, "trigger_create")
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	})
+	mux.HandleFunc("/api/v1/service/portTriggering/", func(w http.ResponseWriter, r *http.Request) {
+		if !f.auth(w, r) {
+			return
+		}
+
+		rest := r.URL.Path[len("/api/v1/service/portTriggering/"):]
+
+		f.mu.Lock()
+		defer f.mu.Unlock()
+
+		if rest == "active" {
+			if r.Method != http.MethodPost {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			f.events = append(f.events, "trigger_active")
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+			return
+		}
+
+		id, err := strconv.Atoi(rest)
+		if err != nil {
+			http.Error(w, "invalid id", http.StatusBadRequest)
+			return
+		}
+
+		switch r.Method {
+		case http.MethodPut:
+			var rule synclayer.PortTriggeringRule
+			if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			// A disabled rule stays in the list, unlike a packet filter rule.
+			rule.ID = id
+			for i := range f.triggers {
+				if f.triggers[i].ID == id {
+					f.triggers[i] = rule
+				}
+			}
+			f.events = append(f.events, "trigger_update")
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		case http.MethodDelete:
+			kept := make([]synclayer.PortTriggeringRule, 0, len(f.triggers))
+			for _, rule := range f.triggers {
+				if rule.ID != id {
+					kept = append(kept, rule)
+				}
+			}
+			f.triggers = kept
+			f.events = append(f.events, "trigger_delete")
 			_ = json.NewEncoder(w).Encode(map[string]any{})
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
