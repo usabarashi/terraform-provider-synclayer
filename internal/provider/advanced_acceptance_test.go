@@ -36,6 +36,7 @@ type advancedFake struct {
 	upnp    synclayer.UPnP
 	fw      synclayer.Firewall
 	routes  []synclayer.StaticRouteIPv6
+	lan     synclayer.LAN
 	nextID  int
 
 	// events records the writes the fake accepted, in order.
@@ -59,8 +60,24 @@ func newAdvancedFake() *advancedFake {
 			{ID: 2, DisplayName: "SIP", ServiceCode: "sip", Active: true},
 			{ID: 3, DisplayName: "RTSP", ServiceCode: "rtsp", Active: false},
 		},
-		upnp:   synclayer.UPnP{Active: true, Interval: 30, TTL: 2},
-		fw:     synclayer.Firewall{IPv4: synclayer.FirewallIPv4{Active: true, Level: "low", Blocks: synclayer.FirewallBlocks{IPFlood: true}}, IPv6: synclayer.FirewallIPv6{Active: true}},
+		upnp: synclayer.UPnP{Active: true, Interval: 30, TTL: 2},
+		fw:   synclayer.Firewall{IPv4: synclayer.FirewallIPv4{Active: true, Level: "low", Blocks: synclayer.FirewallBlocks{IPFlood: true}}, IPv6: synclayer.FirewallIPv6{Active: true}},
+		lan: synclayer.LAN{
+			MACAddress: "02:00:00:00:00:01",
+			IPv4: synclayer.LANIPv4{
+				IPAddress: "192.168.0.1",
+				Subnet:    "255.255.255.0",
+				DHCP: synclayer.LANDHCP{
+					Active:     true,
+					StartIP:    "192.168.0.100",
+					EndIP:      "192.168.0.149",
+					LeaseTime:  86400,
+					WinsServer: "0.0.0.0",
+					Assignment: "manual",
+				},
+			},
+			IPv6: map[string]any{"mode": "stateless"},
+		},
 		nextID: 10,
 	}
 }
@@ -227,6 +244,32 @@ func (f *advancedFake) handler() http.Handler {
 			}
 			f.fw = body
 			f.events = append(f.events, "firewall_put")
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	})
+
+	mux.HandleFunc("/api/v1/network/lan", func(w http.ResponseWriter, r *http.Request) {
+		if !f.auth(w, r) {
+			return
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+
+		switch r.Method {
+		case http.MethodGet:
+			_ = json.NewEncoder(w).Encode(f.lan)
+		case http.MethodPut:
+			var body synclayer.LAN
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			// The device replaces the whole object, keeping every field the
+			// write carries, including the IPv6 block it does not expose.
+			f.lan = body
+			f.events = append(f.events, "lan_put")
 			_ = json.NewEncoder(w).Encode(map[string]any{})
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
