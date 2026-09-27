@@ -48,6 +48,11 @@ type wifiFake struct {
 	meshMode int
 	meshBand string
 
+	// failSSIDWrite and failMeshWrite make the respective endpoint reject
+	// writes, so tests can check what a half-finished write leaves behind.
+	failSSIDWrite bool
+	failMeshWrite bool
+
 	// events records the writes the fake accepted, in order, so tests can
 	// assert on how they were sequenced.
 	events []string
@@ -142,6 +147,10 @@ func (f *wifiFake) handler() http.Handler {
 				},
 			})
 		case http.MethodPut:
+			if f.failSSIDWrite {
+				http.Error(w, `{"error":{"code":1,"type":"internal","message":"simulated failure"}}`, http.StatusInternalServerError)
+				return
+			}
 			var body synclayer.WifiSSID
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
@@ -370,6 +379,10 @@ func (f *wifiFake) handler() http.Handler {
 				"supportBhApBand": []string{"6"}, "supportBhStaBand": []string{"6"},
 			})
 		case http.MethodPut:
+			if f.failMeshWrite {
+				http.Error(w, `{"error":{"code":1,"type":"internal","message":"simulated failure"}}`, http.StatusInternalServerError)
+				return
+			}
 			// Only mode and bhBand are writable.
 			var body map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -775,4 +788,42 @@ resource "synclayer_sxep200w_wifi_ssid" "t" {
 			},
 		},
 	})
+}
+
+func TestWifiSSIDPartialFailureKeepsID(t *testing.T) {
+	// The resource is recorded before its first write, so a write that fails
+	// leaves a resource Terraform can still track rather than a change on the
+	// device with nothing pointing at it. The direct call is enough here: the
+	// configured attributes are not involved, only the id and the SSID write.
+	f := newWifiFake()
+	f.failSSIDWrite = true
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+
+	client, err := synclayer.NewClient(synclayer.Config{
+		BaseURL:  srv.URL,
+		Username: "admin",
+		Password: "s3cret",
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	ctx := context.Background()
+	if err := client.Login(ctx); err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	r := resourceWifiSSID()
+	d := schema.TestResourceDataRaw(t, r.Schema, map[string]interface{}{
+		"band":  "2.4g",
+		"index": 0,
+		"name":  "initial",
+	})
+
+	if diags := resourceWifiSSIDUpsert(ctx, d, client); !diags.HasError() {
+		t.Fatal("expected the SSID write to fail")
+	}
+	if d.Id() != "2.4g/0" {
+		t.Errorf("id = %q after a failed write, want %q", d.Id(), "2.4g/0")
+	}
 }

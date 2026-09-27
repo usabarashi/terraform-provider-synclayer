@@ -266,6 +266,12 @@ func resourceWifiSSIDUpsert(ctx context.Context, d *schema.ResourceData, meta in
 		return diag.Errorf("SSID %s/%d does not exist on the device", wifiBandName(band), index)
 	}
 
+	// Record the resource before the first write. Writing the access control
+	// list as well as the SSID means a failure part-way through would
+	// otherwise leave the device changed but the resource untracked, because
+	// an empty id is discarded.
+	d.SetId(fmt.Sprintf("%s/%d", wifiBandName(band), index))
+
 	raw := d.GetRawConfig()
 
 	// Whether filtering is on right now. The loop below overwrites
@@ -371,7 +377,6 @@ func resourceWifiSSIDUpsert(ctx context.Context, d *schema.ResourceData, meta in
 		}
 	}
 
-	d.SetId(fmt.Sprintf("%s/%d", wifiBandName(band), index))
 	return resourceWifiSSIDRead(ctx, d, meta)
 }
 

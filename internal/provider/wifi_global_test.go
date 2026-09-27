@@ -3,6 +3,7 @@ package provider
 import (
 	"fmt"
 	"net/http/httptest"
+	"regexp"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
@@ -100,4 +101,46 @@ resource "synclayer_sxep200w_wifi_global" "t" {
 			},
 		},
 	})
+}
+
+func TestWifiGlobalPartialFailureKeepsID(t *testing.T) {
+	// A create writes two device settings. When the second write fails, the
+	// first must not be left applied but untracked: the id is recorded before
+	// anything is written, so the resource stays in state and its destroy can
+	// still switch the applied setting back off.
+	f := newWifiFake()
+	f.wpsActive = false
+	f.failMeshWrite = true
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+
+	t.Setenv("SYNCLAYER_HOST", srv.URL)
+	t.Setenv("SYNCLAYER_USERNAME", "admin")
+	t.Setenv("SYNCLAYER_PASSWORD", "s3cret")
+
+	resource.UnitTest(t, resource.TestCase{
+		ProviderFactories: map[string]func() (*schema.Provider, error){
+			"synclayer": func() (*schema.Provider, error) { return New(), nil },
+		},
+		Steps: []resource.TestStep{
+			{
+				Config: `
+resource "synclayer_sxep200w_wifi_global" "t" {
+  wps_active = true
+  mesh_mode  = 3
+}`,
+				ExpectError: regexp.MustCompile("simulated failure"),
+			},
+		},
+	})
+
+	// The failed create left the resource in state, so the harness tore it down
+	// on the way out, and that teardown is what switched WPS back off. Had the
+	// id not been recorded before the first write, there would be nothing in
+	// state to tear down and WPS would still be on.
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.wpsActive {
+		t.Error("WPS is still enabled: the failed create kept no resource in state")
+	}
 }

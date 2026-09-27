@@ -68,6 +68,11 @@ func resourceWifiGlobalUpsert(ctx context.Context, d *schema.ResourceData, meta 
 		return diags
 	}
 
+	// Record the resource before the first write. This resource writes two
+	// devices settings, and a failure in the second would otherwise leave the
+	// first applied but untracked, because an empty id is discarded.
+	d.SetId(wifiGlobalID)
+
 	raw := d.GetRawConfig()
 
 	if set, _ := attrConfigured(raw, "wps_active"); set {
@@ -98,7 +103,6 @@ func resourceWifiGlobalUpsert(ctx context.Context, d *schema.ResourceData, meta 
 		}
 	}
 
-	d.SetId(wifiGlobalID)
 	return resourceWifiGlobalRead(ctx, d, meta)
 }
 
