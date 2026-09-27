@@ -61,14 +61,18 @@ func New() *schema.Provider {
 		// The provider is scoped to the manufacturer (SyncLayer); individual
 		// resources and data sources are namespaced by product (SXEP200W).
 		ResourcesMap: map[string]*schema.Resource{
-			"synclayer_sxep200w_port_forwarding": resourcePortForwarding(),
-			"synclayer_sxep200w_static_route":    resourceStaticRoute(),
-			"synclayer_sxep200w_reserved_ip":     resourceReservedIP(),
-			"synclayer_sxep200w_ddns":            resourceDDNS(),
-			"synclayer_sxep200w_dmz":             resourceDMZ(),
-			"synclayer_sxep200w_wifi_ssid":       resourceWifiSSID(),
-			"synclayer_sxep200w_wifi_radio":      resourceWifiRadio(),
-			"synclayer_sxep200w_wifi_global":     resourceWifiGlobal(),
+			"synclayer_sxep200w_port_forwarding":   resourcePortForwarding(),
+			"synclayer_sxep200w_static_route":      resourceStaticRoute(),
+			"synclayer_sxep200w_reserved_ip":       resourceReservedIP(),
+			"synclayer_sxep200w_ddns":              resourceDDNS(),
+			"synclayer_sxep200w_dmz":               resourceDMZ(),
+			"synclayer_sxep200w_wifi_ssid":         resourceWifiSSID(),
+			"synclayer_sxep200w_wifi_radio":        resourceWifiRadio(),
+			"synclayer_sxep200w_wifi_global":       resourceWifiGlobal(),
+			"synclayer_sxep200w_network_options":   resourceNetworkOptions(),
+			"synclayer_sxep200w_firewall":          resourceFirewall(),
+			"synclayer_sxep200w_upnp":              resourceUPnP(),
+			"synclayer_sxep200w_static_route_ipv6": resourceStaticRouteIPv6(),
 		},
 
 		DataSourcesMap: map[string]*schema.Resource{
