@@ -58,6 +58,12 @@ variable "wifi_password" {
 - `wmf` (Boolean, Optional) Wireless multicast forwarding.
 - `ft` (Boolean, Optional) 802.11r fast transition.
 - `access_control` (Boolean, Optional) Whether MAC access control is enabled.
+- `access_control_allow` (Boolean, Optional) How `access_control_rules` are
+  interpreted: `true` admits only the listed addresses (the device UI calls this
+  White List), `false` rejects them (Black List).
+- `access_control_rules` (Set of String, Optional) MAC addresses registered in
+  this SSID's access control list. The device stores the list without an order,
+  so it is a set; addresses are compared case-insensitively.
 - `client_limit` (Number, Optional) Maximum number of clients allowed on the
   SSID (the device's `numClient.set`).
 
@@ -67,9 +73,19 @@ Fields that are not set are left at their current device value.
 
 - Only the attributes you set are written; everything else keeps its current
   value, so an SSID can be managed partially (for example only its `name`).
+- `access_control_rules` entries carry no name: the device names each entry
+  itself, and a new entry is registered under the placeholder name the device
+  uses.
+- The access control list is shared between the primary slots of both bands on
+  this firmware (verified on VER-01.06.05-EA): writing it through `5g/0` also
+  changes what `2.4g/0` reports. Manage it on one primary slot only, otherwise
+  the two resources fight over the same list.
+- Enabling `access_control` with `access_control_allow = true` restricts the
+  SSID to the registered addresses, so a mistake there locks clients out.
 - `band` and `index` select the slot. Changing either forces a new resource and
   **disables** the previous one.
-- Destroying the resource **disables** the SSID; slots cannot be removed.
+- Destroying the resource **disables** the SSID; slots cannot be removed. The
+  registered addresses are left in place.
 - `password` is stored in Terraform state, and changes made to it outside
   Terraform are not detected.
 
