@@ -212,6 +212,131 @@ func (c *Client) UpdateWifiRadio(ctx context.Context, band int, radio WifiRadio)
 	return c.request(ctx, http.MethodPut, fmt.Sprintf("/wifi/%d/radio", band), radio, nil)
 }
 
+// WifiAccessControlRule is one MAC address registered in an SSID's access
+// control list. The device assigns the id and the name; the name is carried
+// through so that a read-modify-write round trip does not lose it.
+//
+// The id is always serialized: a whole-list write is only faithful when every
+// rule keeps the id the device assigned it, and id 0 is a valid id (verified on
+// VER-01.06.05-EA).
+type WifiAccessControlRule struct {
+	ID         int    `json:"id"`
+	Name       string `json:"name,omitempty"`
+	MacAddress string `json:"macAddress"`
+}
+
+// wifiAccessControlRuleCreate is the body that registers a new rule. It carries
+// no id: the device assigns one.
+type wifiAccessControlRuleCreate struct {
+	Name       string `json:"name,omitempty"`
+	MacAddress string `json:"macAddress"`
+}
+
+// WifiAccessControl is the MAC access control list of one SSID.
+type WifiAccessControl struct {
+	Active bool                    `json:"active"`
+	Allow  bool                    `json:"allow"`
+	Rules  []WifiAccessControlRule `json:"rules"`
+}
+
+// GetWifiAccessControl returns the MAC access control configuration of one SSID.
+// It returns (nil, nil) when the SSID index does not exist.
+func (c *Client) GetWifiAccessControl(ctx context.Context, band, index int) (*WifiAccessControl, error) {
+	var ac WifiAccessControl
+	if err := c.request(ctx, http.MethodGet, fmt.Sprintf("/wifi/%d/ssid/%d/accessControl", band, index), nil, &ac); err != nil {
+		if isNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &ac, nil
+}
+
+// UpdateWifiAccessControl writes the MAC access control configuration of one
+// SSID.
+//
+// Every rule in Rules must carry the id the device gave it. Verified on
+// VER-01.06.05-EA: a write that replays the rules with their ids keeps the list
+// unchanged, but a write whose rules have no id does not replace the list
+// faithfully — the device renumbers the entries and can drop one — so callers
+// must reconcile the list with CreateWifiAccessControlRule and
+// DeleteWifiAccessControlRule instead of sending a new one.
+func (c *Client) UpdateWifiAccessControl(ctx context.Context, band, index int, ac WifiAccessControl) error {
+	return c.request(ctx, http.MethodPut, fmt.Sprintf("/wifi/%d/ssid/%d/accessControl", band, index), ac, nil)
+}
+
+// CreateWifiAccessControlRule registers one MAC address in an SSID's access
+// control list. The device assigns the rule's id.
+func (c *Client) CreateWifiAccessControlRule(ctx context.Context, band, index int, rule WifiAccessControlRule) error {
+	body := wifiAccessControlRuleCreate{Name: rule.Name, MacAddress: rule.MacAddress}
+	return c.request(ctx, http.MethodPost, fmt.Sprintf("/wifi/%d/ssid/%d/accessControl", band, index), body, nil)
+}
+
+// DeleteWifiAccessControlRule removes one rule from an SSID's access control
+// list, identified by the id the device assigned it.
+func (c *Client) DeleteWifiAccessControlRule(ctx context.Context, band, index, ruleID int) error {
+	return c.request(ctx, http.MethodDelete, fmt.Sprintf("/wifi/%d/ssid/%d/accessControl/%d", band, index, ruleID), nil, nil)
+}
+
+// WifiWPS mirrors GET /api/v1/wifi/wps. The WPS configuration is device-wide,
+// not per band or per SSID.
+type WifiWPS struct {
+	Active bool   `json:"active"`
+	PIN    string `json:"pin,omitempty"`
+
+	// Status is the runtime pairing state reported by the device. It is
+	// read-only and never sent back.
+	Status string `json:"status,omitempty"`
+}
+
+// GetWifiWPS returns the device-wide WPS configuration.
+func (c *Client) GetWifiWPS(ctx context.Context) (*WifiWPS, error) {
+	var wps WifiWPS
+	if err := c.request(ctx, http.MethodGet, "/wifi/wps", nil, &wps); err != nil {
+		return nil, err
+	}
+	return &wps, nil
+}
+
+// UpdateWifiWPS enables or disables the device-wide WPS.
+//
+// Only the active flag is writable. Verified on VER-01.06.05-EA: a PUT carrying
+// only "active" is accepted and leaves the device's PIN untouched, so the PIN
+// (and the runtime pairing status) is never part of a write.
+func (c *Client) UpdateWifiWPS(ctx context.Context, active bool) error {
+	return c.request(ctx, http.MethodPut, "/wifi/wps", map[string]any{"active": active}, nil)
+}
+
+// WifiMeshMode mirrors GET /api/v1/wifi/meshmode. Mesh mode is device-wide.
+type WifiMeshMode struct {
+	Mode         int    `json:"mode"`
+	BackhaulBand string `json:"bhBand"`
+
+	// SupportBhApBand / SupportBhStaBand list the bands the device could use
+	// for a backhaul. They are read-only and never sent back.
+	SupportBhApBand  []string `json:"supportBhApBand,omitempty"`
+	SupportBhStaBand []string `json:"supportBhStaBand,omitempty"`
+}
+
+// GetWifiMeshMode returns the device-wide mesh configuration.
+func (c *Client) GetWifiMeshMode(ctx context.Context) (*WifiMeshMode, error) {
+	var mesh WifiMeshMode
+	if err := c.request(ctx, http.MethodGet, "/wifi/meshmode", nil, &mesh); err != nil {
+		return nil, err
+	}
+	return &mesh, nil
+}
+
+// UpdateWifiMeshMode writes the device-wide mesh configuration.
+//
+// Only mode and bhBand are writable. Verified on VER-01.06.05-EA: a PUT
+// carrying only those two is accepted (200) and the reported configuration is
+// unchanged; the device's supporting-band lists are read-only and are never
+// sent back.
+func (c *Client) UpdateWifiMeshMode(ctx context.Context, mode int, backhaulBand string) error {
+	return c.request(ctx, http.MethodPut, "/wifi/meshmode", map[string]any{"mode": mode, "bhBand": backhaulBand}, nil)
+}
+
 func isNotFound(err error) bool {
 	var apiErr *APIError
 	if errors.As(err, &apiErr) {

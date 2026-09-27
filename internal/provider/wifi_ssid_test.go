@@ -89,3 +89,32 @@ func TestWifiSSIDIndexSchemaValidation(t *testing.T) {
 		t.Error("index 2 should be refused by the schema")
 	}
 }
+
+func TestWifiSSIDAccessControlRulesSchema(t *testing.T) {
+	rules := resourceWifiSSID().Schema["access_control_rules"]
+
+	// Addresses are hashed case-insensitively, so a lower-case configuration
+	// matches the upper-case form the device reports.
+	set := rules.Set
+	if set == nil {
+		t.Fatal("access_control_rules has no Set function")
+	}
+	if set("aa:bb:cc:dd:ee:01") != set("AA:BB:CC:DD:EE:01") {
+		t.Error("MAC addresses should hash case-insensitively")
+	}
+
+	validate := rules.Elem.(*schema.Schema).ValidateFunc
+	if validate == nil {
+		t.Fatal("access_control_rules has no ValidateFunc")
+	}
+	for _, mac := range []string{"aa:bb:cc:dd:ee:01", "AA:BB:CC:DD:EE:01"} {
+		if _, errs := validate(mac, "access_control_rules"); len(errs) > 0 {
+			t.Errorf("%s should be accepted: %v", mac, errs)
+		}
+	}
+	for _, mac := range []string{"nonsense", "aa:bb:cc:dd:ee", "aa:bb:cc:dd:ee:01:02"} {
+		if _, errs := validate(mac, "access_control_rules"); len(errs) == 0 {
+			t.Errorf("%s should be refused by the schema", mac)
+		}
+	}
+}
