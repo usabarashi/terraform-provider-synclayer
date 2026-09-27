@@ -76,6 +76,8 @@ func New() *schema.Provider {
 			"synclayer_sxep200w_lan":               resourceLAN(),
 			"synclayer_sxep200w_packet_filtering":  resourcePacketFiltering(),
 			"synclayer_sxep200w_port_triggering":   resourcePortTriggering(),
+			"synclayer_sxep200w_eco_mode":          resourceEcoMode(),
+			"synclayer_sxep200w_datetime":          resourceDateTime(),
 		},
 
 		DataSourcesMap: map[string]*schema.Resource{

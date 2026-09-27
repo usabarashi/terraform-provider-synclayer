@@ -62,6 +62,15 @@ type advancedFake struct {
 	triggerListFails       int
 	triggerHideCreated     bool
 
+	// eco and date are the device's management settings. The device answers an
+	// eco write asynchronously, so ecoPending holds a change that only becomes
+	// visible after ecoPendingReads reads.
+	eco             synclayer.EcoMode
+	ecoPending      *synclayer.EcoMode
+	ecoPendingReads int
+	ecoNeverApplies bool
+	date            synclayer.DateTime
+
 	// events records the writes the fake accepted, in order.
 	events []string
 }
@@ -111,6 +120,13 @@ func newAdvancedFake() *advancedFake {
 			"ipv6": {},
 		},
 		nextTrig: 1,
+		eco:      synclayer.EcoMode{Active: false, Type: 1, ScheduleEnabled: false, StartTime: "21:00", EndTime: "06:00"},
+		date: synclayer.DateTime{
+			DaylightSaving: synclayer.DateTimeDST{Active: false},
+			NTP:            synclayer.DateTimeNTP{Active: true, Servers: []string{"ntp.example.test"}},
+			TimeZone:       127,
+			TimeZoneName:   "Tokyo",
+		},
 	}
 }
 
@@ -518,6 +534,76 @@ func (f *advancedFake) handler() http.Handler {
 			}
 			f.triggers = kept
 			f.events = append(f.events, "trigger_delete")
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	})
+
+	mux.HandleFunc("/api/v1/gateway/eco", func(w http.ResponseWriter, r *http.Request) {
+		if !f.auth(w, r) {
+			return
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+
+		switch r.Method {
+		case http.MethodGet:
+			// A write is applied asynchronously: the old settings are reported
+			// until it has been taken up.
+			if f.ecoPending != nil && !f.ecoNeverApplies {
+				f.ecoPendingReads--
+				if f.ecoPendingReads <= 0 {
+					f.eco = *f.ecoPending
+					f.ecoPending = nil
+				}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"eco": f.eco, "options": map[string]any{}})
+		case http.MethodPut:
+			var body struct {
+				Eco synclayer.EcoMode `json:"eco"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			// The device accepts the write asynchronously: it is applied only
+			// after a couple of reads, like a deferred job.
+			f.ecoPending = &body.Eco
+			f.ecoPendingReads = 2
+			f.events = append(f.events, "eco_put")
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	})
+
+	mux.HandleFunc("/api/v1/gateway/datetime", func(w http.ResponseWriter, r *http.Request) {
+		if !f.auth(w, r) {
+			return
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+
+		switch r.Method {
+		case http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"currentDateTime":    "2026.09.27 21:18:07",
+				"daylightSavingTime": f.date.DaylightSaving,
+				"ntp":                f.date.NTP,
+				"timeZone":           f.date.TimeZone,
+				"timeZoneName":       f.date.TimeZoneName,
+				"timeZoneList":       []string{"(GMT+09:00) Tokyo"},
+			})
+		case http.MethodPut:
+			var body synclayer.DateTime
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			f.date = body
+			f.events = append(f.events, "datetime_put")
 			_ = json.NewEncoder(w).Encode(map[string]any{})
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
