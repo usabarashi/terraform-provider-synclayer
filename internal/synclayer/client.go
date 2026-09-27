@@ -47,6 +47,11 @@ type Client struct {
 	// portTriggeringMu serialises the create-then-identify sequence for port
 	// triggering rules, whose ids the device does not report back.
 	portTriggeringMu sync.Mutex
+
+	// accessControlMu serialises checking a packet filter priority and taking
+	// it. The device has no create-if-free operation, so the check and the
+	// write have to be kept together to stop two creates from racing.
+	accessControlMu sync.Mutex
 }
 
 // NewClient validates the configuration and returns a Client. It does not

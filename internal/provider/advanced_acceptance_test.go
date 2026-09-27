@@ -54,6 +54,14 @@ type advancedFake struct {
 	acGets       int
 	triggerDecoy bool
 
+	// acFailPost makes the packet filter write fail. For port triggering,
+	// triggerFailAfterCreate makes the read that follows a create fail (once),
+	// and triggerHideCreated makes those reads leave the created rule out.
+	acFailPost             bool
+	triggerFailAfterCreate bool
+	triggerListFails       int
+	triggerHideCreated     bool
+
 	// events records the writes the fake accepted, in order.
 	events []string
 }
@@ -358,6 +366,10 @@ func (f *advancedFake) handler() http.Handler {
 
 		switch {
 		case len(parts) == 1 && r.Method == http.MethodPost:
+			if f.acFailPost {
+				http.Error(w, `{"error":{"code":500,"type":"internal_error","message":"simulated failure"}}`, http.StatusInternalServerError)
+				return
+			}
 			var rule synclayer.AccessControlRule
 			if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
@@ -416,7 +428,16 @@ func (f *advancedFake) handler() http.Handler {
 
 		switch r.Method {
 		case http.MethodGet:
-			_ = json.NewEncoder(w).Encode(map[string]any{"rules": f.triggers, "active": true, "maxRules": 10})
+			if f.triggerListFails > 0 {
+				f.triggerListFails--
+				http.Error(w, `{"error":{"code":500,"type":"internal_error","message":"simulated failure"}}`, http.StatusInternalServerError)
+				return
+			}
+			rules := f.triggers
+			if f.triggerHideCreated && len(rules) > 0 {
+				rules = rules[:len(rules)-1]
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"rules": rules, "active": true, "maxRules": 10})
 		case http.MethodPost:
 			var rule synclayer.PortTriggeringRule
 			if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
@@ -438,6 +459,9 @@ func (f *advancedFake) handler() http.Handler {
 				f.nextTrig++
 			}
 			f.events = append(f.events, "trigger_create")
+			if f.triggerFailAfterCreate {
+				f.triggerListFails = 1
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{})
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)

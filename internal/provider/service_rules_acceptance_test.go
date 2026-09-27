@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http/httptest"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
@@ -337,5 +338,101 @@ func TestPortTriggeringCreateIgnoresOtherNewRules(t *testing.T) {
 	}
 	if got == nil || got.Description != "mine" {
 		t.Errorf("resolved id %d to the wrong rule: %+v", id, got)
+	}
+}
+
+// TestPacketFilteringDoesNotKeepAnIDWhenTheWriteFails covers the other half of
+// the ownership rule: a failed write cannot be told apart from one that landed,
+// and a rule is removed by priority alone, so the resource must not hold on to
+// a priority it may not own.
+func TestPacketFilteringDoesNotKeepAnIDWhenTheWriteFails(t *testing.T) {
+	f := newAdvancedFake()
+	f.acFailPost = true
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+
+	client, err := synclayer.NewClient(synclayer.Config{BaseURL: srv.URL, Username: "admin", Password: "s3cret"})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	ctx := context.Background()
+	if err := client.Login(ctx); err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	r := resourcePacketFiltering()
+	d := schema.TestResourceDataRaw(t, r.Schema, map[string]interface{}{
+		"family":   "ipv4",
+		"priority": 20,
+	})
+
+	if diags := resourcePacketFilteringCreate(ctx, d, client); !diags.HasError() {
+		t.Fatal("expected the write to fail")
+	}
+	if d.Id() != "" {
+		t.Errorf("id = %q after a failed write, want it empty: the rule is deleted by priority alone", d.Id())
+	}
+}
+
+// TestPortTriggeringCreateRetriesIdentification covers the read that can fail
+// after the rule already exists: it is retried, so that failure does not leave a
+// created rule outside state.
+func TestPortTriggeringCreateRetriesIdentification(t *testing.T) {
+	f := newAdvancedFake()
+	f.triggerFailAfterCreate = true
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+
+	client, err := synclayer.NewClient(synclayer.Config{BaseURL: srv.URL, Username: "admin", Password: "s3cret"})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	ctx := context.Background()
+	if err := client.Login(ctx); err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	rule := synclayer.PortTriggeringRule{
+		Active:      true,
+		Description: "mine",
+		Triggered:   synclayer.PortTriggeringRange{Protocol: "tcp", StartRange: 59998, EndRange: 59998},
+		Forwarded:   synclayer.PortTriggeringRange{Protocol: "tcp", StartRange: 59997, EndRange: 59997},
+	}
+	id, err := client.CreatePortTriggeringRule(ctx, rule)
+	if err != nil {
+		t.Fatalf("CreatePortTriggeringRule: %v", err)
+	}
+	if got, err := client.GetPortTriggeringRule(ctx, id); err != nil || got == nil {
+		t.Errorf("no rule at id %d (err=%v)", id, err)
+	}
+}
+
+// TestPortTriggeringCreateReportsUnidentifiedRule covers the case where the id
+// can never be read back: the error has to say that the rule may exist.
+func TestPortTriggeringCreateReportsUnidentifiedRule(t *testing.T) {
+	f := newAdvancedFake()
+	f.triggerHideCreated = true
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+
+	client, err := synclayer.NewClient(synclayer.Config{BaseURL: srv.URL, Username: "admin", Password: "s3cret"})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	ctx := context.Background()
+	if err := client.Login(ctx); err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	_, err = client.CreatePortTriggeringRule(ctx, synclayer.PortTriggeringRule{
+		Active:    true,
+		Triggered: synclayer.PortTriggeringRange{Protocol: "tcp", StartRange: 1, EndRange: 1},
+		Forwarded: synclayer.PortTriggeringRange{Protocol: "tcp", StartRange: 2, EndRange: 2},
+	})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !strings.Contains(err.Error(), "import") {
+		t.Errorf("the error should say the rule may need importing: %v", err)
 	}
 }

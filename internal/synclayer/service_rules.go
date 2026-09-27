@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -103,15 +104,23 @@ var ErrAccessControlPriorityTaken = errors.New("packet filter priority is alread
 
 // CreateAccessControlRule adds a rule at the index it carries.
 //
-// The device replaces whatever already sits at that index, so the slot is
-// checked first; a caller that has already made that check is told apart by
-// ErrAccessControlPriorityTaken, which is returned without writing anything.
+// The device replaces whatever already sits at that index and offers nothing
+// like a conditional create: an If-None-Match header is ignored and the write
+// goes through anyway (checked on VER-01.06.05-EA). The slot is therefore
+// checked and taken while holding a lock, so two creates in the same provider
+// cannot both see it free and have the second overwrite the first. A writer
+// outside this process can still win that race, and no request the device
+// accepts would make the pair atomic.
 func (c *Client) CreateAccessControlRule(ctx context.Context, family string, rule AccessControlRule) error {
 	if !rule.Active {
 		// A rule that is not active is a rule that does not exist: the device
 		// would answer 200 and store nothing.
 		return errors.New("a packet filter rule cannot be created inactive: the device has no disabled state for rules")
 	}
+
+	c.accessControlMu.Lock()
+	defer c.accessControlMu.Unlock()
+
 	existing, err := c.GetAccessControlRule(ctx, family, rule.Index)
 	if err != nil {
 		return err
@@ -194,6 +203,11 @@ func (c *Client) GetPortTriggeringRule(ctx context.Context, id int) (*PortTrigge
 // comparing what appeared against what was asked for. The whole discovery is
 // serialised: two creates running at the same time would otherwise see each
 // other's rules and fail to tell which id is theirs.
+//
+// The read that identifies the new rule can fail on its own — by then the rule
+// exists — so it is retried a few times before giving up, and the error it
+// returns says that the rule may have to be imported rather than pretending
+// nothing happened.
 func (c *Client) CreatePortTriggeringRule(ctx context.Context, rule PortTriggeringRule) (int, error) {
 	c.portTriggeringMu.Lock()
 	defer c.portTriggeringMu.Unlock()
@@ -205,28 +219,43 @@ func (c *Client) CreatePortTriggeringRule(ctx context.Context, rule PortTriggeri
 	if err := c.request(ctx, http.MethodPost, "/service/portTriggering", rule, nil); err != nil {
 		return 0, err
 	}
-	after, err := c.ListPortTriggeringRules(ctx)
-	if err != nil {
-		return 0, err
-	}
 
-	seen := make(map[int]bool, len(before))
-	for _, r := range before {
-		seen[r.ID] = true
-	}
-	newID := 0
-	matches := 0
-	for _, r := range after {
-		if seen[r.ID] || !samePortTriggeringRule(r, rule) {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return 0, ctx.Err()
+			case <-time.After(200 * time.Millisecond):
+			}
+		}
+
+		after, err := c.ListPortTriggeringRules(ctx)
+		if err != nil {
+			lastErr = err
 			continue
 		}
-		newID = r.ID
-		matches++
+
+		seen := make(map[int]bool, len(before))
+		for _, r := range before {
+			seen[r.ID] = true
+		}
+		newID := 0
+		matches := 0
+		for _, r := range after {
+			if seen[r.ID] || !samePortTriggeringRule(r, rule) {
+				continue
+			}
+			newID = r.ID
+			matches++
+		}
+		if matches == 1 {
+			return newID, nil
+		}
+		lastErr = errors.New("the rule could not be told apart from the others on the device")
 	}
-	if matches == 1 {
-		return newID, nil
-	}
-	return 0, errors.New("rule was created but could not be identified afterwards")
+
+	return 0, fmt.Errorf("the rule was created but its id could not be read back (%v): check the device and import the rule before applying again", lastErr)
 }
 
 // samePortTriggeringRule reports whether two rules describe the same thing. The

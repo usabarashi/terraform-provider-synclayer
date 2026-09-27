@@ -51,7 +51,9 @@ resource "synclayer_sxep200w_packet_filtering" "block_telnet" {
   and `end_port`.
 - `dest` (Block, Optional) Destination side, same fields.
 
-Fields that are not set are left at their current device value.
+On update, fields that are not set keep their current device value. On create
+there is no such value yet: fields left out are sent empty (or `0`), and
+whatever the device stores is read back into state.
 
 ## Management notes
 

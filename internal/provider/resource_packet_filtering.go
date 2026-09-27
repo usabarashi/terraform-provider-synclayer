@@ -2,7 +2,6 @@ package provider
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -255,11 +254,11 @@ func resourcePacketFilteringCreate(ctx context.Context, d *schema.ResourceData, 
 
 	rule := expandPacketFiltering(d)
 	if err := client.CreateAccessControlRule(ctx, family, rule); err != nil {
-		if errors.Is(err, synclayer.ErrAccessControlPriorityTaken) {
-			// Nothing was written. This resource must not keep claiming the
-			// priority: a destroy would then delete a rule it does not own.
-			d.SetId("")
-		}
+		// A failed create cannot be told apart from one that landed, and a rule
+		// is deleted by priority alone, so the id is not kept: holding it could
+		// later delete whatever ends up at that priority, including a rule this
+		// configuration never created. A rule that did land has to be imported.
+		d.SetId("")
 		return diag.FromErr(err)
 	}
 
