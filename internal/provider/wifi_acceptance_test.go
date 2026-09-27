@@ -65,7 +65,7 @@ func newWifiFake() *wifiFake {
 		radioBandwidth: "40",
 		acAllow:        true,
 		wpsActive:      true,
-		wpsPIN:         "12345670",
+		wpsPIN:         "00000000",
 	}
 }
 

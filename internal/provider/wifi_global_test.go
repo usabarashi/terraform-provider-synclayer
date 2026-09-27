@@ -69,7 +69,7 @@ func TestWifiGlobalLifecycle(t *testing.T) {
 			if f.meshMode != 0 {
 				return fmt.Errorf("mesh mode = %d after destroy, want 0", f.meshMode)
 			}
-			if f.wpsPIN != "12345670" {
+			if f.wpsPIN != "00000000" {
 				return fmt.Errorf("WPS PIN changed on destroy: %q", f.wpsPIN)
 			}
 			return nil
