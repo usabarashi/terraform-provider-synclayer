@@ -68,6 +68,7 @@ type advancedFake struct {
 	eco             synclayer.EcoMode
 	ecoPending      *synclayer.EcoMode
 	ecoPendingReads int
+	ecoNeverApplies bool
 	date            synclayer.DateTime
 
 	// events records the writes the fake accepted, in order.
@@ -550,7 +551,7 @@ func (f *advancedFake) handler() http.Handler {
 		case http.MethodGet:
 			// A write is applied asynchronously: the old settings are reported
 			// until it has been taken up.
-			if f.ecoPending != nil {
+			if f.ecoPending != nil && !f.ecoNeverApplies {
 				f.ecoPendingReads--
 				if f.ecoPendingReads <= 0 {
 					f.eco = *f.ecoPending

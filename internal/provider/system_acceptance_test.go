@@ -3,6 +3,7 @@ package provider
 import (
 	"fmt"
 	"net/http/httptest"
+	"regexp"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
@@ -152,6 +153,36 @@ resource "synclayer_sxep200w_datetime" "t" {
 				ImportState:       true,
 				ImportStateId:     dateTimeID,
 				ImportStateVerify: true,
+			},
+		},
+	})
+}
+
+// TestEcoModeReportsAnUnappliedWrite covers a write the device accepts and then
+// never applies: reporting success would leave the state claiming something the
+// device is not running, and the next plan would propose the same change again.
+func TestEcoModeReportsAnUnappliedWrite(t *testing.T) {
+	f := newAdvancedFake()
+	f.ecoNeverApplies = true
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+
+	t.Setenv("SYNCLAYER_HOST", srv.URL)
+	t.Setenv("SYNCLAYER_USERNAME", "admin")
+	t.Setenv("SYNCLAYER_PASSWORD", "s3cret")
+
+	resource.UnitTest(t, resource.TestCase{
+		ProviderFactories: map[string]func() (*schema.Provider, error){
+			"synclayer": func() (*schema.Provider, error) { return New(), nil },
+		},
+		Steps: []resource.TestStep{
+			{
+				Config: `
+resource "synclayer_sxep200w_eco_mode" "t" {
+  start_time = "23:00"
+  end_time   = "07:00"
+}`,
+				ExpectError: regexp.MustCompile("does not report it as applied"),
 			},
 		},
 	})

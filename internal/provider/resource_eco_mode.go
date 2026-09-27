@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"time"
 
@@ -120,14 +121,18 @@ func resourceEcoModeUpsert(ctx context.Context, d *schema.ResourceData, meta int
 // device answers 202 before it has applied the change, so a read straight
 // afterwards can still show the old settings, and recording those would leave
 // the state describing something the device never applied. The wait is bounded,
-// so a value the device adjusts rather than stores cannot hang an apply.
+// and a write that never becomes visible is reported rather than passed off as
+// done — a value the device adjusts instead of storing is a reason to look at
+// the device, not a reason to call the apply a success.
 func waitForEcoMode(ctx context.Context, client *synclayer.Client, want synclayer.EcoMode) error {
+	var last synclayer.EcoMode
 	for attempt := 0; attempt < 5; attempt++ {
 		read, err := client.GetEcoMode(ctx)
 		if err != nil {
 			return err
 		}
-		if *read == want || attempt == 4 {
+		last = *read
+		if last == want {
 			return nil
 		}
 		select {
@@ -136,7 +141,7 @@ func waitForEcoMode(ctx context.Context, client *synclayer.Client, want synclaye
 		case <-time.After(200 * time.Millisecond):
 		}
 	}
-	return nil
+	return fmt.Errorf("the device accepted the eco mode write but does not report it as applied: asked for %+v, the device reports %+v", want, last)
 }
 
 func resourceEcoModeRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
